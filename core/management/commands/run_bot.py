@@ -316,14 +316,14 @@ class Command(BaseCommand):
         try:
             while True:
                 try:
-                    bot.infinity_polling(timeout=20)
+                    bot.infinity_polling(timeout=60, long_polling_timeout=60)
                 except Exception as e:
                     self.stdout.write(
                         self.style.WARNING(
-                            f"Network error: {e}. Restarting bot in 5 seconds..."
+                            f"Network error: {e}. Restarting bot in 10 seconds..."
                         )
                     )
-                    time.sleep(5)
+                    time.sleep(10)
         except KeyboardInterrupt:
             self.stdout.write(self.style.WARNING("\nBot stopped by user."))
 
