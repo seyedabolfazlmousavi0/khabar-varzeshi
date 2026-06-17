@@ -27,7 +27,7 @@ from telebot.types import (
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.db import close_old_connections
+from django.db import close_old_connections, connection
 from dotenv import load_dotenv
 
 from core.models import NewsArticle
@@ -47,6 +47,88 @@ TELEGRAM_CAPTION_LIMIT = 1024
 # Callback-data prefixes for the inline keyboard.
 ACTION_APPROVE = "approve"
 ACTION_REJECT = "reject"
+
+# Fields the bot needs on every article load (explicit list for refresh_from_db).
+_ARTICLE_BOT_FIELDS = (
+    "image_url",
+    "telegram_text",
+    "site_title",
+    "site_lead",
+    "site_body",
+    "status",
+    "original_title",
+    "original_url",
+)
+
+
+def _normalized_image_url(article: NewsArticle) -> str | None:
+    """Return a stripped image URL, or None if empty."""
+    url = (article.image_url or "").strip()
+    return url or None
+
+
+def _raw_image_url_from_db(article_id: int) -> str | None:
+    """Read image_url directly from the DB (bypasses ORM instance cache)."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT image_url FROM core_newsarticle WHERE id = %s",
+            [article_id],
+        )
+        row = cursor.fetchone()
+    if not row or row[0] is None:
+        return None
+    return str(row[0]).strip() or None
+
+
+def _load_article_for_bot(article_id: int) -> NewsArticle:
+    """Load a single article with a fresh DB read (thread-safe for telebot).
+
+    telebot handlers run in worker threads. ``close_old_connections()`` plus
+    ``refresh_from_db()`` ensures we never serve a stale in-memory instance
+    that was loaded before ``image_url`` was written by the worker process.
+    """
+    close_old_connections()
+    article = (
+        NewsArticle.objects.using("default")
+        .select_related("source")
+        .get(pk=article_id)
+    )
+    article.refresh_from_db(fields=_ARTICLE_BOT_FIELDS)
+    return article
+
+
+def _load_pending_articles(batch_size: int) -> list[NewsArticle]:
+    """Return up to ``batch_size`` oldest pending articles, freshly loaded."""
+    close_old_connections()
+    pending_ids = list(
+        NewsArticle.objects.using("default")
+        .filter(status=NewsArticle.Status.PENDING)
+        .order_by("created_at")
+        .values_list("pk", flat=True)[:batch_size]
+    )
+    return [_load_article_for_bot(pk) for pk in pending_ids]
+
+
+def _resolve_image_url(article: NewsArticle) -> str | None:
+    """Return the best available image URL, with ORM-vs-DB fallback."""
+    image_url = _normalized_image_url(article)
+    if image_url:
+        return image_url
+
+    raw_url = _raw_image_url_from_db(article.id)
+    if raw_url:
+        logger.warning(
+            "article id=%s: ORM image_url was empty but DB has %r — using raw value.",
+            article.id,
+            raw_url,
+        )
+        return raw_url
+
+    logger.info(
+        "article id=%s: image_url is empty in both ORM and DB.",
+        article.id,
+    )
+    return None
 
 
 def _send_with_optional_image(
@@ -170,6 +252,12 @@ class Command(BaseCommand):
 
         bot = telebot.TeleBot(token, parse_mode="HTML")
 
+        self.stdout.write(
+            self.style.HTTP_INFO(
+                f"Database: {settings.DATABASES['default']['NAME']}"
+            )
+        )
+
         def _is_admin(chat_id: int) -> bool:
             return chat_id == admin_chat_id
 
@@ -188,14 +276,8 @@ class Command(BaseCommand):
         def cmd_check_pending(message: Message) -> None:
             if not _is_admin(message.chat.id):
                 return
-            close_old_connections()
 
-            pending_qs = (
-                NewsArticle.objects.filter(status=NewsArticle.Status.PENDING)
-                .select_related("source")
-                .order_by("created_at")[:PENDING_BATCH_SIZE]
-            )
-            pending = list(pending_qs)
+            pending = _load_pending_articles(PENDING_BATCH_SIZE)
 
             if not pending:
                 bot.send_message(
@@ -210,16 +292,17 @@ class Command(BaseCommand):
             )
 
             for article in pending:
+                image_url = _resolve_image_url(article)
                 self.stdout.write(
                     f"  preview article id={article.id} "
-                    f"image_url={article.image_url or 'NONE'}"
+                    f"image_url={image_url or 'NONE'}"
                 )
                 try:
                     _send_with_optional_image(
                         bot,
                         message.chat.id,
                         _format_article_message(article),
-                        article.image_url,
+                        image_url,
                         reply_markup=_build_keyboard(article.id),
                     )
                 except Exception as exc:
@@ -237,7 +320,6 @@ class Command(BaseCommand):
             if call.message is None or not _is_admin(call.message.chat.id):
                 bot.answer_callback_query(call.id, "اجازه دسترسی ندارید.")
                 return
-            close_old_connections()
 
             action, _, raw_id = (call.data or "").partition("_")
             try:
@@ -247,7 +329,7 @@ class Command(BaseCommand):
                 return
 
             try:
-                article = NewsArticle.objects.get(pk=article_id)
+                article = _load_article_for_bot(article_id)
             except NewsArticle.DoesNotExist:
                 bot.answer_callback_query(call.id, "این خبر در پایگاه داده پیدا نشد.")
                 self._safe_edit(
@@ -258,9 +340,10 @@ class Command(BaseCommand):
                 return
 
             if action == ACTION_APPROVE:
+                image_url = _resolve_image_url(article)
                 self.stdout.write(
                     f"  publish article id={article.id} "
-                    f"image_url={article.image_url or 'NONE'} "
+                    f"image_url={image_url or 'NONE'} "
                     f"text={len(article.telegram_text or '')} chars"
                 )
                 try:
@@ -268,7 +351,7 @@ class Command(BaseCommand):
                         bot,
                         os.getenv("TELEGRAM_PUBLIC_CHANNEL_ID"),
                         article.telegram_text or "",
-                        article.image_url,
+                        image_url,
                     )
                 except ApiTelegramException as exc:
                     logger.warning(
