@@ -39,7 +39,7 @@ urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 
 logger = logging.getLogger(__name__)
 
-PENDING_BATCH_SIZE = 5
+PENDING_BATCH_SIZE = 20
 
 # Telegram caption character limit for send_photo (1024 chars per BotAPI).
 TELEGRAM_CAPTION_LIMIT = 1024
@@ -97,13 +97,13 @@ def _load_article_for_bot(article_id: int) -> NewsArticle:
     return article
 
 
-def _load_pending_articles(batch_size: int) -> list[NewsArticle]:
-    """Return up to ``batch_size`` oldest pending articles, freshly loaded."""
+def _load_pending_articles(batch_size: int = PENDING_BATCH_SIZE) -> list[NewsArticle]:
+    """Return up to ``batch_size`` newest pending articles, freshly loaded."""
     close_old_connections()
     pending_ids = list(
         NewsArticle.objects.using("default")
         .filter(status=NewsArticle.Status.PENDING)
-        .order_by("created_at")
+        .order_by("-created_at")
         .values_list("pk", flat=True)[:batch_size]
     )
     return [_load_article_for_bot(pk) for pk in pending_ids]
@@ -277,6 +277,11 @@ class Command(BaseCommand):
             if not _is_admin(message.chat.id):
                 return
 
+            self.stdout.write(
+                self.style.HTTP_INFO(
+                    "Fetching the 20 latest pending articles..."
+                )
+            )
             pending = _load_pending_articles(PENDING_BATCH_SIZE)
 
             if not pending:
