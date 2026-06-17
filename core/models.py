@@ -1,5 +1,7 @@
 from django.db import models
 
+from core.url_utils import normalize_article_url
+
 
 class RssSource(models.Model):
     name = models.CharField(max_length=100)
@@ -48,3 +50,8 @@ class NewsArticle(models.Model):
 
     def __str__(self):
         return self.original_title
+
+    def save(self, *args, **kwargs):
+        if self.original_url:
+            self.original_url = normalize_article_url(self.original_url)
+        super().save(*args, **kwargs)

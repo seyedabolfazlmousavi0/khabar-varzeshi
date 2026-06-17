@@ -42,6 +42,7 @@ import httpx
 from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+from django.db import IntegrityError
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -50,6 +51,7 @@ from requests.exceptions import ReadTimeout as RequestsReadTimeout
 from requests.exceptions import Timeout as RequestsTimeout
 
 from core.models import NewsArticle, RssSource
+from core.url_utils import normalize_article_url
 
 
 DEFAULT_GEMINI_MODEL = "models/gemini-3.5-flash"
@@ -326,8 +328,21 @@ class Command(BaseCommand):
             stats["errors"] += 1
             return stats
 
-        if NewsArticle.objects.filter(original_url=link).exists():
-            self.stdout.write(f"  - duplicate, skipped: {title[:80]}")
+        canonical_url = normalize_article_url(link)
+        if not canonical_url:
+            self.stderr.write(self.style.WARNING("  Skipping entry with empty URL."))
+            stats["errors"] += 1
+            return stats
+
+        if link != canonical_url:
+            self.stdout.write(
+                f"  → URL normalized: {link!r} → {canonical_url!r}"
+            )
+
+        if self._article_exists(canonical_url):
+            self.stdout.write(
+                f"  - duplicate, skipped: {title[:80]} ({canonical_url})"
+            )
             stats["skipped"] += 1
             return stats
 
@@ -397,17 +412,39 @@ class Command(BaseCommand):
             if TELEGRAM_CHANNEL_ID not in telegram_text:
                 telegram_text = f"{telegram_text}\n\n{TELEGRAM_CHANNEL_ID}".strip()
 
-            NewsArticle.objects.create(
-                source=source,
-                original_title=title[:255],
-                original_url=link,
-                image_url=(image_url or None),
-                site_title=(parsed.get("site_title") or "").strip()[:255] or None,
-                site_lead=(parsed.get("site_lead") or "").strip() or None,
-                site_body=(parsed.get("site_body") or "").strip() or None,
-                telegram_text=telegram_text or None,
-                status=NewsArticle.Status.PENDING,
-            )
+            # Re-check after the (slow) Gemini call — another worker may have
+            # inserted the same URL while we were waiting.
+            if self._article_exists(canonical_url):
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  - duplicate after Gemini, skipped: {title[:80]} "
+                        f"({canonical_url})"
+                    )
+                )
+                stats["skipped"] += 1
+                return stats
+
+            try:
+                NewsArticle.objects.create(
+                    source=source,
+                    original_title=title[:255],
+                    original_url=canonical_url,
+                    image_url=(image_url or None),
+                    site_title=(parsed.get("site_title") or "").strip()[:255] or None,
+                    site_lead=(parsed.get("site_lead") or "").strip() or None,
+                    site_body=(parsed.get("site_body") or "").strip() or None,
+                    telegram_text=telegram_text or None,
+                    status=NewsArticle.Status.PENDING,
+                )
+            except IntegrityError:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  - duplicate on save (DB constraint), skipped: "
+                        f"{title[:80]} ({canonical_url})"
+                    )
+                )
+                stats["skipped"] += 1
+                return stats
 
             self.stdout.write(self.style.SUCCESS(f"  + created: {title[:80]}"))
             stats["created"] += 1
@@ -440,3 +477,8 @@ class Command(BaseCommand):
             stats["errors"] += 1
 
         return stats
+
+    @staticmethod
+    def _article_exists(canonical_url: str) -> bool:
+        """Return True if an article with this canonical URL is already stored."""
+        return NewsArticle.objects.filter(original_url=canonical_url).exists()
