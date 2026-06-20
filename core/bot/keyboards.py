@@ -2,16 +2,49 @@
 
 from __future__ import annotations
 
+import unicodedata
+
+from aiogram.filters import BaseFilter
 from aiogram.types import (
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
 
+# Single source of truth for the reply-keyboard label and text-router matching.
 CHECK_PENDING_BUTTON = "📋 بررسی آخرین اخبار"
+
+# Telegram clients may cache an older reply keyboard until the admin sends /start.
+_CHECK_PENDING_ALIASES = frozenset(
+    {
+        CHECK_PENDING_BUTTON,
+        "📋 Check Pending",
+    }
+)
+
+
+def normalize_button_text(text: str | None) -> str:
+    if not text:
+        return ""
+    return unicodedata.normalize("NFC", text.strip())
+
+
+def is_check_pending_button(text: str | None) -> bool:
+    """True when ``text`` matches the check-pending reply keyboard label."""
+    normalized = normalize_button_text(text)
+    return normalized in {normalize_button_text(label) for label in _CHECK_PENDING_ALIASES}
+
+
+class CheckPendingButtonFilter(BaseFilter):
+    """Match incoming messages sent via the check-pending reply keyboard button."""
+
+    async def __call__(self, message: Message) -> bool:
+        return is_check_pending_button(message.text)
+
 
 BTN_APPROVE = "✅ تایید و ارسال"
 BTN_REJECT = "❌ رد کردن"
