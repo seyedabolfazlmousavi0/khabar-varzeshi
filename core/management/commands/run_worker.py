@@ -28,7 +28,6 @@ socket.getaddrinfo = _ipv4_only_getaddrinfo
 # -----------------------------------------------------------------------------
 
 import logging
-import os
 import time
 from typing import Any
 
@@ -42,6 +41,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections
 from dotenv import load_dotenv
 
+from core.bot.config import load_bot_config
 from core.models import NewsArticle
 
 
@@ -61,22 +61,12 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         load_dotenv(settings.BASE_DIR / ".env")
 
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        admin_id_raw = os.getenv("TELEGRAM_ADMIN_CHAT_ID")
-
-        if not token or token == "your_bot_token_here":
-            raise CommandError("TELEGRAM_BOT_TOKEN is not set in .env.")
-        if not admin_id_raw or admin_id_raw == "your_chat_id_here":
-            raise CommandError("TELEGRAM_ADMIN_CHAT_ID is not set in .env.")
-
         try:
-            admin_chat_id = int(admin_id_raw)
+            config = load_bot_config()
         except ValueError as exc:
-            raise CommandError(
-                "TELEGRAM_ADMIN_CHAT_ID must be a numeric chat id."
-            ) from exc
+            raise CommandError(str(exc)) from exc
 
-        bot = telebot.TeleBot(token, parse_mode="HTML")
+        bot = telebot.TeleBot(config.token, parse_mode="HTML")
 
         def job() -> None:
             try:
@@ -104,29 +94,33 @@ class Command(BaseCommand):
                 if new_count > 0:
                     text = (
                         f"🔔 <b>{new_count} خبر جدید استخراج و بازنویسی شد!</b>\n\n"
-                        "برای بررسی و تایید، دستور /check_pending را ارسال کنید."
+                        "برای بررسی و تایید، دکمه <b>Check Pending</b> را بزنید "
+                        "یا /check_pending را ارسال کنید."
                     )
-                    try:
-                        bot.send_message(
-                            admin_chat_id,
-                            text,
-                            parse_mode="HTML",
-                        )
-                        self.stdout.write(
-                            self.style.SUCCESS(
-                                f"[worker] notified admin of "
-                                f"{new_count} new article(s)."
+                    for admin_id in config.allowed_admin_ids:
+                        try:
+                            bot.send_message(
+                                admin_id,
+                                text,
+                                parse_mode="HTML",
                             )
-                        )
-                    except ApiTelegramException as exc:
-                        logger.warning(
-                            "[worker] Failed to notify admin: %r", exc
-                        )
-                        self.stderr.write(
-                            self.style.WARNING(
-                                f"[worker] failed to notify admin: {exc!r}"
+                        except ApiTelegramException as exc:
+                            logger.warning(
+                                "[worker] Failed to notify admin %s: %r",
+                                admin_id,
+                                exc,
                             )
+                            self.stderr.write(
+                                self.style.WARNING(
+                                    f"[worker] failed to notify admin {admin_id}: {exc!r}"
+                                )
+                            )
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            f"[worker] notified {len(config.allowed_admin_ids)} "
+                            f"admin(s) of {new_count} new article(s)."
                         )
+                    )
                 else:
                     self.stdout.write(
                         f"[worker] no new articles "
@@ -148,7 +142,8 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 f"Worker started. Running `fetch_news` every "
                 f"{CHECK_INTERVAL_MINUTES} minute(s). "
-                f"Admin chat id: {admin_chat_id}. Press Ctrl+C to stop."
+                f"Admin IDs: {', '.join(str(i) for i in sorted(config.allowed_admin_ids))}. "
+                "Press Ctrl+C to stop."
             )
         )
 
