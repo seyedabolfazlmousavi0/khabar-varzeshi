@@ -10,20 +10,33 @@ reply keyboard, and centralized ALLOWED_ADMIN_IDS authorization.
 
 from __future__ import annotations
 
-import logging
+# --- Force IPv4 for ALL outbound HTTP traffic ---------------------------------
+# Must run BEFORE any HTTP client (aiohttp, urllib3, httpx, etc.) is imported.
 import socket
-import time
-from typing import Any
 
 import urllib3.util.connection as urllib3_cn
+
+urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
+
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+
+socket.getaddrinfo = _ipv4_only_getaddrinfo
+# -----------------------------------------------------------------------------
+
+import logging
+import time
+from typing import Any
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from core.bot.app import run_bot
 from core.bot.config import load_bot_config
-
-urllib3_cn.allowed_gai_family = lambda: socket.AF_INET
 
 logger = logging.getLogger(__name__)
 
