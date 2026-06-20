@@ -42,6 +42,7 @@ from django.db import close_old_connections
 from dotenv import load_dotenv
 
 from core.bot.config import load_bot_config
+from core.bot.keyboards import CHECK_PENDING_BUTTON
 from core.models import NewsArticle
 
 
@@ -94,7 +95,7 @@ class Command(BaseCommand):
                 if new_count > 0:
                     text = (
                         f"🔔 <b>{new_count} خبر جدید استخراج و بازنویسی شد!</b>\n\n"
-                        "برای بررسی و تایید، دکمه <b>Check Pending</b> را بزنید "
+                        f"برای بررسی و تایید، دکمه <b>{CHECK_PENDING_BUTTON}</b> را بزنید "
                         "یا /check_pending را ارسال کنید."
                     )
                     for admin_id in config.allowed_admin_ids:

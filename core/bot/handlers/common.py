@@ -6,10 +6,12 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
+from asgiref.sync import sync_to_async
 
 from core.bot.auth import AdminFilter
 from core.bot.config import BotConfig
-from core.bot.keyboards import admin_main_menu, remove_reply_keyboard
+from core.bot.keyboards import CHECK_PENDING_BUTTON, admin_main_menu, article_review_keyboard, remove_reply_keyboard
+from core.bot.services import load_article_for_bot, refresh_article_preview
 
 
 def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
@@ -19,16 +21,16 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
     async def cmd_start(message: Message) -> None:
         if message.from_user and message.from_user.id in config.allowed_admin_ids:
             await message.answer(
-                "Hello! I am the Khabar Varzeshi editorial bot.\n\n"
-                "Use the <b>Check Pending</b> button or /check_pending "
-                "to review articles awaiting approval.",
+                "سلام! من ربات سردبیر خبرورزشی هستم.\n\n"
+                f"برای بررسی اخبار در انتظار تایید، دکمه <b>{CHECK_PENDING_BUTTON}</b> "
+                "یا دستور /check_pending را بزنید.",
                 parse_mode="HTML",
                 reply_markup=admin_main_menu(),
             )
             return
 
         await message.answer(
-            "This bot is restricted to authorized editors.",
+            "این ربات فقط برای سردبیران مجاز است.",
             reply_markup=remove_reply_keyboard(),
         )
 
@@ -37,14 +39,33 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         current = await state.get_state()
         if current is None:
             await message.answer(
-                "Nothing to cancel.",
+                "عملیاتی برای لغو وجود ندارد.",
                 reply_markup=admin_main_menu(),
             )
             return
 
+        data = await state.get_data()
+        article_id = data.get("article_id")
+        preview_chat_id = data.get("preview_chat_id")
+        preview_message_id = data.get("preview_message_id")
+
         await state.clear()
+
+        if article_id and preview_chat_id and preview_message_id:
+            try:
+                article = await sync_to_async(load_article_for_bot)(article_id)
+                await refresh_article_preview(
+                    message.bot,
+                    chat_id=preview_chat_id,
+                    message_id=preview_message_id,
+                    article=article,
+                    reply_markup=article_review_keyboard(article.id),
+                )
+            except Exception:
+                pass
+
         await message.answer(
-            "Action cancelled.",
+            "عملیات لغو شد.",
             reply_markup=admin_main_menu(),
         )
 

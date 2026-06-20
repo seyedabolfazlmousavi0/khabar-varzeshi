@@ -27,11 +27,11 @@ async def _send_pending_batch(message: Message, config: BotConfig) -> None:
     pending = await sync_to_async(load_pending_articles)(config.pending_batch_size)
 
     if not pending:
-        await message.answer("No articles are waiting for approval.")
+        await message.answer("هیچ خبر در انتظار تاییدی وجود ندارد.")
         return
 
     await message.answer(
-        f"📋 <b>{len(pending)}</b> article(s) pending review:",
+        f"📋 <b>{len(pending)}</b> خبر در انتظار تایید:",
         parse_mode="HTML",
     )
 

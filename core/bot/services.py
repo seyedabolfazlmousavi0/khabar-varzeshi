@@ -12,6 +12,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.types import InlineKeyboardMarkup, Message
 from django.db import close_old_connections, connection
 
+from core.bot.text_compose import format_link_html, parse_telegram_text
 from core.models import NewsArticle
 
 logger = logging.getLogger(__name__)
@@ -91,14 +92,27 @@ def resolve_image_url(article: NewsArticle) -> str | None:
     return None
 
 
+def _format_telegram_preview(raw: str | None) -> str:
+    """Render telegram_text for the admin preview (body escaped, link as HTML)."""
+    parsed = parse_telegram_text(raw)
+    segments: list[str] = []
+    if parsed.body:
+        segments.append(html.escape(parsed.body))
+    if parsed.link_url:
+        segments.append(format_link_html(parsed.link_url))
+    if parsed.footer:
+        segments.append(html.escape(parsed.footer))
+    return "\n\n".join(segments) if segments else "—"
+
+
 def format_article_message(article: NewsArticle) -> str:
     title = html.escape(article.site_title or article.original_title or "—")
     lead = html.escape(article.site_lead or "—")
-    telegram_text = html.escape(article.telegram_text or "—")
+    telegram_text = _format_telegram_preview(article.telegram_text)
     return (
-        f"📰 <b>Title:</b> {title}\n\n"
-        f"📝 <b>Lead:</b> {lead}\n\n"
-        f"📱 <b>Telegram:</b>\n{telegram_text}"
+        f"📰 <b>تیتر:</b> {title}\n\n"
+        f"📝 <b>لید:</b> {lead}\n\n"
+        f"📱 <b>تلگرام:</b>\n{telegram_text}"
     )
 
 
@@ -195,6 +209,38 @@ async def update_review_message(
             )
     except TelegramAPIError as exc:
         logger.warning("Failed to update review message: %r", exc)
+
+
+async def refresh_article_preview(
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    article: NewsArticle,
+    reply_markup: InlineKeyboardMarkup | None,
+) -> None:
+    """Refresh a pending-article preview by chat/message id."""
+    preview_text = format_article_message(article)
+    try:
+        await bot.edit_message_text(
+            text=preview_text,
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode="HTML",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+    except TelegramAPIError:
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=message_id,
+                caption=preview_text,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        except TelegramAPIError as exc:
+            logger.warning("Failed to refresh article preview: %r", exc)
 
 
 async def finalize_review_message(

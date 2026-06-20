@@ -16,14 +16,23 @@ from core.bot.keyboards import (
     ACTION_APPROVE,
     ACTION_EDIT,
     ACTION_REJECT,
+    edit_force_reply,
 )
 from core.bot.services import (
     finalize_review_message,
+    format_article_message,
     load_article_for_bot,
     resolve_image_url,
     send_with_optional_image,
+    update_review_message,
 )
 from core.bot.states import AddLinkStates, EditNewsStates
+from core.bot.text_compose import (
+    SITE_LINK_ANCHOR,
+    get_editable_body,
+    normalize_telegram_text,
+    parse_telegram_text,
+)
 from core.models import NewsArticle
 
 logger = logging.getLogger(__name__)
@@ -45,37 +54,38 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
     @router.callback_query(F.data.startswith(f"{ACTION_APPROVE}:"))
     async def on_approve(callback: CallbackQuery, state: FSMContext) -> None:
         if not is_admin_user(callback.from_user, config.allowed_admin_ids):
-            await callback.answer("Access denied.", show_alert=True)
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
             return
 
         await state.clear()
 
         article_id = _parse_article_id(callback.data)
         if article_id is None or callback.message is None:
-            await callback.answer("Invalid data.")
+            await callback.answer("داده نامعتبر.")
             return
 
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
-            await callback.answer("Article not found.")
+            await callback.answer("خبر پیدا نشد.")
             await finalize_review_message(
                 callback.bot,
                 callback.message,
-                suffix="⚠️ This article no longer exists.",
+                suffix="⚠️ این خبر دیگر در پایگاه داده وجود ندارد.",
             )
             return
 
         if article.status != NewsArticle.Status.PENDING:
-            await callback.answer("This article is no longer pending.")
+            await callback.answer("این خبر دیگر در انتظار تایید نیست.")
             return
 
+        publish_text = normalize_telegram_text(article.telegram_text)
         image_url = await sync_to_async(resolve_image_url)(article)
         try:
             await send_with_optional_image(
                 callback.bot,
                 config.public_channel_id,
-                article.telegram_text or "",
+                publish_text,
                 image_url,
             )
         except Exception as exc:
@@ -84,117 +94,150 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
                 article.id,
                 exc,
             )
-            await callback.answer("Failed to publish to channel.", show_alert=True)
-            await callback.message.answer(f"❌ Channel publish error: {exc}")
+            await callback.answer("ارسال به کانال ناموفق بود.", show_alert=True)
+            await callback.message.answer(f"❌ خطا در ارسال به کانال: {exc}")
             return
 
         article.status = NewsArticle.Status.PUBLISHED
         await sync_to_async(article.save)(update_fields=["status"])
-        await callback.answer("✅ Published.")
+        await callback.answer("✅ منتشر شد.")
         await finalize_review_message(
             callback.bot,
             callback.message,
-            suffix="✅ <b>Approved and published.</b>",
+            suffix="✅ <b>تایید و ارسال شد.</b>",
         )
 
     @router.callback_query(F.data.startswith(f"{ACTION_REJECT}:"))
     async def on_reject(callback: CallbackQuery, state: FSMContext) -> None:
         if not is_admin_user(callback.from_user, config.allowed_admin_ids):
-            await callback.answer("Access denied.", show_alert=True)
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
             return
 
         await state.clear()
 
         article_id = _parse_article_id(callback.data)
         if article_id is None or callback.message is None:
-            await callback.answer("Invalid data.")
+            await callback.answer("داده نامعتبر.")
             return
 
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
-            await callback.answer("Article not found.")
+            await callback.answer("خبر پیدا نشد.")
             await finalize_review_message(
                 callback.bot,
                 callback.message,
-                suffix="⚠️ This article no longer exists.",
+                suffix="⚠️ این خبر دیگر در پایگاه داده وجود ندارد.",
             )
             return
 
         article.status = NewsArticle.Status.REJECTED
         await sync_to_async(article.save)(update_fields=["status"])
-        await callback.answer("❌ Rejected.")
+        await callback.answer("❌ رد شد.")
         await finalize_review_message(
             callback.bot,
             callback.message,
-            suffix="❌ <b>Rejected by editor.</b>",
+            suffix="❌ <b>رد شد.</b>",
         )
 
     @router.callback_query(F.data.startswith(f"{ACTION_EDIT}:"))
     async def on_edit(callback: CallbackQuery, state: FSMContext) -> None:
         if not is_admin_user(callback.from_user, config.allowed_admin_ids):
-            await callback.answer("Access denied.", show_alert=True)
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
             return
 
         article_id = _parse_article_id(callback.data)
         if article_id is None or callback.message is None:
-            await callback.answer("Invalid data.")
+            await callback.answer("داده نامعتبر.")
             return
 
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
-            await callback.answer("Article not found.")
+            await callback.answer("خبر پیدا نشد.")
             return
 
         if article.status != NewsArticle.Status.PENDING:
-            await callback.answer("This article is no longer pending.")
+            await callback.answer("این خبر دیگر در انتظار تایید نیست.")
             return
+
+        parsed = parse_telegram_text(article.telegram_text)
+        editable_body = get_editable_body(article.telegram_text)
+        preview_text = await sync_to_async(format_article_message)(article)
+
+        await update_review_message(
+            callback.bot,
+            callback.message,
+            preview_text,
+            reply_markup=None,
+            suffix="✏️ <b>در حال ویرایش...</b>",
+        )
 
         await state.set_state(EditNewsStates.waiting_for_text)
         await state.update_data(
             article_id=article_id,
             preview_chat_id=callback.message.chat.id,
             preview_message_id=callback.message.message_id,
+            preview_is_photo=bool(callback.message.photo),
+            editable_body=editable_body,
+            link_url=parsed.link_url,
+            footer=parsed.footer,
+            original_telegram_text=article.telegram_text or "",
         )
         await callback.answer()
-        await callback.message.answer(
-            f"✏️ Send the new Telegram text for article <b>#{article_id}</b>.\n\n"
-            "Send /cancel to abort.",
-            parse_mode="HTML",
+
+        prompt_header = (
+            f"✏️ متن فعلی پست (خبر #{article_id}):\n\n"
+            "متن زیر را ویرایش کرده و در پاسخ ارسال کنید.\n"
+            "برای لغو: /cancel"
         )
+        if editable_body:
+            await callback.message.answer(prompt_header)
+            await callback.message.answer(
+                editable_body,
+                reply_markup=edit_force_reply(),
+            )
+        else:
+            await callback.message.answer(
+                f"{prompt_header}\n\n(متن فعلی خالی است — متن جدید را ارسال کنید.)",
+                reply_markup=edit_force_reply(),
+            )
 
     @router.callback_query(F.data.startswith(f"{ACTION_ADD_LINK}:"))
     async def on_add_link(callback: CallbackQuery, state: FSMContext) -> None:
         if not is_admin_user(callback.from_user, config.allowed_admin_ids):
-            await callback.answer("Access denied.", show_alert=True)
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
             return
 
         article_id = _parse_article_id(callback.data)
         if article_id is None or callback.message is None:
-            await callback.answer("Invalid data.")
+            await callback.answer("داده نامعتبر.")
             return
 
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
-            await callback.answer("Article not found.")
+            await callback.answer("خبر پیدا نشد.")
             return
 
         if article.status != NewsArticle.Status.PENDING:
-            await callback.answer("This article is no longer pending.")
+            await callback.answer("این خبر دیگر در انتظار تایید نیست.")
             return
+
+        parsed = parse_telegram_text(article.telegram_text)
 
         await state.set_state(AddLinkStates.waiting_for_url)
         await state.update_data(
             article_id=article_id,
             preview_chat_id=callback.message.chat.id,
             preview_message_id=callback.message.message_id,
+            footer=parsed.footer,
         )
         await callback.answer()
         await callback.message.answer(
-            f"🔗 Send a URL to append to article <b>#{article_id}</b>.\n\n"
-            "Send /cancel to abort.",
+            f"🔗 لینک مقاله را برای خبر <b>#{article_id}</b> ارسال کنید.\n\n"
+            f"متن لینک ثابت خواهد بود: «{SITE_LINK_ANCHOR}»\n"
+            "برای لغو: /cancel",
             parse_mode="HTML",
         )
 
