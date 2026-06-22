@@ -39,6 +39,7 @@ from typing import Any
 
 import feedparser
 import httpx
+import requests
 from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
@@ -48,6 +49,7 @@ from google import genai
 from google.genai import types
 from requests.exceptions import ConnectTimeout as RequestsConnectTimeout
 from requests.exceptions import ReadTimeout as RequestsReadTimeout
+from requests.exceptions import RequestException
 from requests.exceptions import Timeout as RequestsTimeout
 
 from core.models import NewsArticle, RssSource
@@ -56,7 +58,63 @@ from core.url_utils import normalize_article_url
 
 DEFAULT_GEMINI_MODEL = "models/gemini-3.5-flash"
 GEMINI_REQUEST_TIMEOUT = 120  # seconds
+ARTICLE_FETCH_TIMEOUT = 30  # seconds
+MIN_ARTICLE_TEXT_CHARS = 100
 TELEGRAM_CHANNEL_ID = "@KhabarVarzeshi"
+
+_DEFAULT_REQUEST_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (compatible; KhabarVarzeshiBot/1.0; "
+        "+https://khabarvarzeshi.com)"
+    ),
+    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
+}
+
+# Selectors tried in order when extracting the main article body from a page.
+_ARTICLE_BODY_SELECTORS = (
+    "article",
+    "[role='main']",
+    "main",
+    ".article-body",
+    ".article__body",
+    ".article-content",
+    ".article__content",
+    ".entry-content",
+    ".post-content",
+    ".story-body",
+    ".content-body",
+    ".news-body",
+    ".news-content",
+    "#article-body",
+    "#main-content",
+    ".main-content",
+)
+
+# Tags / classes removed before measuring or returning article text.
+_NOISE_SELECTORS = (
+    "script",
+    "style",
+    "noscript",
+    "header",
+    "footer",
+    "nav",
+    "aside",
+    ".sidebar",
+    ".comments",
+    ".comment",
+    ".comment-list",
+    ".related",
+    ".related-articles",
+    ".advertisement",
+    ".ad",
+    ".ads",
+    ".social-share",
+    ".share-buttons",
+    ".newsletter",
+    ".breadcrumb",
+    ".breadcrumbs",
+)
 
 # Every timeout-shaped exception we may encounter from any HTTP library.
 TIMEOUT_EXCEPTIONS: tuple[type[BaseException], ...] = (
@@ -114,6 +172,82 @@ def _strip_markdown_fences(text: str) -> str:
     cleaned = _FENCE_RE.sub("", cleaned)
     cleaned = _FENCE_RE.sub("", cleaned)
     return cleaned.strip()
+
+
+def _fetch_page_html(url: str) -> str:
+    """Download the HTML for an article URL. Returns '' on failure."""
+    if not url:
+        return ""
+
+    try:
+        response = requests.get(
+            url,
+            headers=_DEFAULT_REQUEST_HEADERS,
+            timeout=ARTICLE_FETCH_TIMEOUT,
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+    except RequestException:
+        return ""
+
+    if not response.text or not response.text.strip():
+        return ""
+
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    if content_type and "html" not in content_type and "text/" not in content_type:
+        return ""
+
+    return response.text
+
+
+def _decompose_noise(soup: BeautifulSoup) -> None:
+    for selector in _NOISE_SELECTORS:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+
+def _extract_article_body_html(page_html: str) -> str:
+    """Extract the main article body HTML from a full webpage."""
+    if not page_html:
+        return ""
+
+    soup = BeautifulSoup(page_html, "html.parser")
+    _decompose_noise(soup)
+
+    best_element = None
+    best_length = 0
+
+    for selector in _ARTICLE_BODY_SELECTORS:
+        for element in soup.select(selector):
+            text_length = len(element.get_text(strip=True))
+            if text_length > best_length:
+                best_length = text_length
+                best_element = element
+
+    if best_element is not None and best_length >= MIN_ARTICLE_TEXT_CHARS:
+        return str(best_element)
+
+    body = soup.find("body")
+    if body is not None:
+        body_length = len(body.get_text(strip=True))
+        if body_length >= MIN_ARTICLE_TEXT_CHARS:
+            return str(body)
+
+    return ""
+
+
+def _resolve_article_html(
+    url: str,
+    entry: feedparser.FeedParserDict,
+) -> tuple[str, str]:
+    """Return (html, source) — prefer scraped webpage, fall back to RSS."""
+    page_html = _fetch_page_html(url)
+    if page_html:
+        article_html = _extract_article_body_html(page_html)
+        if len(_clean_html_to_text(article_html)) >= MIN_ARTICLE_TEXT_CHARS:
+            return article_html, "webpage"
+
+    return _extract_raw_html(entry), "rss"
 
 
 def _extract_raw_html(entry: feedparser.FeedParserDict) -> str:
@@ -346,10 +480,22 @@ class Command(BaseCommand):
             stats["skipped"] += 1
             return stats
 
-        raw_html = _extract_raw_html(entry)
+        raw_html, content_source = _resolve_article_html(canonical_url, entry)
         clean_text = _clean_html_to_text(raw_html)
         if not clean_text:
             clean_text = title
+
+        self.stdout.write(self.style.HTTP_INFO(
+            f"  → article content "
+            f"| source={content_source} "
+            f"| html={len(raw_html)} chars "
+            f"| text={len(clean_text)} chars"
+        ))
+        if content_source == "rss":
+            self.stderr.write(self.style.WARNING(
+                f"  ! webpage scrape unavailable for '{title[:60]}' "
+                f"— using RSS fallback."
+            ))
 
         image_candidates = _extract_image_candidates(entry, raw_html)
         image_url = image_candidates[0][1] if image_candidates else None
