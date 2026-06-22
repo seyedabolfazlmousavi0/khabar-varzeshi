@@ -42,6 +42,8 @@ pydantic_core==2.46.4
 pyparsing==3.3.2
 aiogram
 python-dotenv==1.2.2
+selenium>=4.25.0
+webdriver-manager>=4.0.2
 requests==2.34.2
 schedule==1.2.2
 sgmllib3k==1.0.0
