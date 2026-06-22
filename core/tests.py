@@ -1,6 +1,10 @@
 from django.test import SimpleTestCase
 
-from core.management.commands.fetch_news import _build_article_fetch_urls
+from core.management.commands.fetch_news import (
+    _FETCH_STRATEGIES,
+    _build_article_fetch_urls,
+    _validate_fetched_page,
+)
 from core.url_utils import normalize_article_url
 
 
@@ -22,3 +26,22 @@ class ArticleFetchUrlTests(SimpleTestCase):
             any(url.startswith("https://www.tasnimnews.com/") for url in urls),
             urls,
         )
+
+
+class FetchStrategyTests(SimpleTestCase):
+    def test_fetch_strategies_include_multiple_backends(self):
+        names = [name for name, _, _ in _FETCH_STRATEGIES]
+        self.assertIn("requests-session/chrome-same-origin", names)
+        self.assertIn("httpx/http1-chrome", names)
+        self.assertIn("aiohttp/chrome-same-origin", names)
+        self.assertGreaterEqual(len(_FETCH_STRATEGIES), 10)
+
+    def test_validate_fetched_page_rejects_gateway_errors(self):
+        html, error = _validate_fetched_page(
+            502,
+            "<html></html>",
+            "text/html",
+            "https://example.com/article",
+        )
+        self.assertEqual(html, "")
+        self.assertIn("502", error)

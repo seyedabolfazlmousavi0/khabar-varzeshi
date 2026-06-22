@@ -31,14 +31,17 @@ def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 socket.getaddrinfo = _ipv4_only_getaddrinfo
 # -----------------------------------------------------------------------------
 
+import asyncio
 import json
 import os
 import re
 import time
 import traceback
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+import aiohttp
 import feedparser
 import httpx
 import requests
@@ -63,6 +66,7 @@ GEMINI_REQUEST_TIMEOUT = 120  # seconds
 ARTICLE_FETCH_TIMEOUT = 30  # seconds
 ARTICLE_FETCH_RETRIES = 3
 ARTICLE_FETCH_RETRY_DELAY_SECONDS = 1.5
+ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS = 0.75
 MIN_ARTICLE_TEXT_CHARS = 100
 TELEGRAM_CHANNEL_ID = "@KhabarVarzeshi"
 
@@ -70,6 +74,10 @@ _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
+)
+_FIREFOX_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) "
+    "Gecko/20100101 Firefox/133.0"
 )
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({403, 408, 429, 500, 502, 503, 504})
@@ -180,8 +188,8 @@ def _strip_markdown_fences(text: str) -> str:
     return cleaned.strip()
 
 
-def _browser_headers(url: str) -> dict[str, str]:
-    """Build browser-like request headers for article page fetches."""
+def _browser_headers_chrome(url: str) -> dict[str, str]:
+    """Chrome-like headers simulating in-site navigation."""
     parsed = urlparse(url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     return {
@@ -205,6 +213,177 @@ def _browser_headers(url: str) -> dict[str, str]:
         "Cache-Control": "max-age=0",
         "Referer": f"{origin}/",
     }
+
+
+def _browser_headers_chrome_direct(url: str) -> dict[str, str]:
+    """Chrome-like headers simulating a direct address-bar navigation."""
+    return {
+        "User-Agent": _BROWSER_USER_AGENT,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8"
+        ),
+        "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+    }
+
+
+def _browser_headers_firefox(url: str) -> dict[str, str]:
+    """Firefox-like headers without Chromium client hints."""
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return {
+        "User-Agent": _FIREFOX_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Referer": f"{origin}/",
+    }
+
+
+def _browser_headers_minimal(url: str) -> dict[str, str]:
+    """Small header set for stacks that mishandle client-hint headers."""
+    return {
+        "User-Agent": _BROWSER_USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.8",
+    }
+
+
+def _validate_fetched_page(
+    status_code: int,
+    body: str,
+    content_type: str,
+    url: str,
+) -> tuple[str, str]:
+    if status_code in _RETRYABLE_HTTP_STATUS_CODES:
+        return "", f"{url}: HTTP {status_code}"
+    if status_code >= 400:
+        return "", f"{url}: HTTP {status_code}"
+    if not body or not body.strip():
+        return "", f"{url}: empty response body"
+
+    content_type = (content_type or "").lower()
+    if content_type and "html" not in content_type and "text/" not in content_type:
+        return "", f"{url}: unexpected content-type: {content_type}"
+
+    return body, ""
+
+
+def _fetch_via_requests_session(url: str, headers: dict[str, str]) -> tuple[str, str]:
+    with requests.Session() as session:
+        session.trust_env = False
+        session.headers.clear()
+        session.headers.update(headers)
+        response = session.get(
+            url,
+            timeout=ARTICLE_FETCH_TIMEOUT,
+            allow_redirects=True,
+        )
+        return _validate_fetched_page(
+            response.status_code,
+            response.text,
+            response.headers.get("Content-Type", ""),
+            url,
+        )
+
+
+def _fetch_via_requests_plain(url: str, headers: dict[str, str]) -> tuple[str, str]:
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=ARTICLE_FETCH_TIMEOUT,
+        allow_redirects=True,
+    )
+    return _validate_fetched_page(
+        response.status_code,
+        response.text,
+        response.headers.get("Content-Type", ""),
+        url,
+    )
+
+
+def _fetch_via_httpx(url: str, headers: dict[str, str], *, http2: bool = False) -> tuple[str, str]:
+    with httpx.Client(
+        headers=headers,
+        timeout=ARTICLE_FETCH_TIMEOUT,
+        follow_redirects=True,
+        http2=http2,
+        trust_env=False,
+    ) as client:
+        response = client.get(url)
+        return _validate_fetched_page(
+            response.status_code,
+            response.text,
+            response.headers.get("Content-Type", ""),
+            url,
+        )
+
+
+async def _fetch_via_aiohttp_async(url: str, headers: dict[str, str]) -> tuple[str, str]:
+    timeout = aiohttp.ClientTimeout(total=ARTICLE_FETCH_TIMEOUT)
+    connector = aiohttp.TCPConnector(ssl=True, force_close=True)
+    async with aiohttp.ClientSession(
+        headers=headers,
+        timeout=timeout,
+        connector=connector,
+        trust_env=False,
+    ) as session:
+        async with session.get(url, allow_redirects=True) as response:
+            body = await response.text()
+            return _validate_fetched_page(
+                response.status,
+                body,
+                response.headers.get("Content-Type", ""),
+                url,
+            )
+
+
+def _fetch_via_httpx_http2(url: str, headers: dict[str, str]) -> tuple[str, str]:
+    try:
+        return _fetch_via_httpx(url, headers, http2=True)
+    except ImportError:
+        return "", f"{url}: httpx http2 support not available"
+
+
+def _fetch_via_aiohttp(url: str, headers: dict[str, str]) -> tuple[str, str]:
+    try:
+        return asyncio.run(_fetch_via_aiohttp_async(url, headers))
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        return "", f"{url}: {type(exc).__name__}: {exc}"
+
+
+FetchBackend = Callable[[str, dict[str, str]], tuple[str, str]]
+HeaderProfile = Callable[[str], dict[str, str]]
+
+# Each strategy is tried in order until one returns HTML.
+_FETCH_STRATEGIES: list[tuple[str, HeaderProfile, FetchBackend]] = [
+    ("requests-session/chrome-same-origin", _browser_headers_chrome, _fetch_via_requests_session),
+    ("requests-plain/chrome-same-origin", _browser_headers_chrome, _fetch_via_requests_plain),
+    ("requests-session/chrome-direct", _browser_headers_chrome_direct, _fetch_via_requests_session),
+    ("requests-plain/chrome-direct", _browser_headers_chrome_direct, _fetch_via_requests_plain),
+    ("requests-session/firefox", _browser_headers_firefox, _fetch_via_requests_session),
+    ("requests-plain/firefox", _browser_headers_firefox, _fetch_via_requests_plain),
+    ("httpx/http1-chrome", _browser_headers_chrome, lambda u, h: _fetch_via_httpx(u, h, http2=False)),
+    ("httpx/http1-chrome-direct", _browser_headers_chrome_direct, lambda u, h: _fetch_via_httpx(u, h, http2=False)),
+    ("httpx/http1-firefox", _browser_headers_firefox, lambda u, h: _fetch_via_httpx(u, h, http2=False)),
+    ("httpx/http1-minimal", _browser_headers_minimal, lambda u, h: _fetch_via_httpx(u, h, http2=False)),
+    ("httpx/http2-chrome", _browser_headers_chrome, _fetch_via_httpx_http2),
+    ("aiohttp/chrome-same-origin", _browser_headers_chrome, _fetch_via_aiohttp),
+    ("aiohttp/chrome-direct", _browser_headers_chrome_direct, _fetch_via_aiohttp),
+    ("aiohttp/firefox", _browser_headers_firefox, _fetch_via_aiohttp),
+    ("aiohttp/minimal", _browser_headers_minimal, _fetch_via_aiohttp),
+    ("requests-session/minimal", _browser_headers_minimal, _fetch_via_requests_session),
+]
 
 
 def _build_article_fetch_urls(original_url: str, canonical_url: str) -> list[str]:
@@ -249,64 +428,46 @@ def _build_article_fetch_urls(original_url: str, canonical_url: str) -> list[str
     return candidates
 
 
-def _fetch_page_html(urls: str | list[str]) -> tuple[str, str]:
-    """Download article HTML. Tries each URL with retries. Returns (html, error)."""
+def _fetch_page_html(urls: str | list[str]) -> tuple[str, str, str]:
+    """Download article HTML, cycling fetch backends until one succeeds."""
     if isinstance(urls, str):
         url_list = [urls]
     else:
         url_list = [url for url in urls if url]
 
     if not url_list:
-        return "", "empty url"
+        return "", "empty url", ""
 
     last_error = "unknown error"
+    strategy_index = 0
 
-    with requests.Session() as session:
-        for url in url_list:
-            session.headers.clear()
-            session.headers.update(_browser_headers(url))
+    for url in url_list:
+        for strategy_name, header_profile, backend in _FETCH_STRATEGIES:
+            headers = header_profile(url)
 
             for attempt in range(1, ARTICLE_FETCH_RETRIES + 1):
-                if attempt > 1:
-                    delay = ARTICLE_FETCH_RETRY_DELAY_SECONDS * attempt
+                if strategy_index > 0 or attempt > 1:
+                    delay = ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS * (
+                        strategy_index + attempt
+                    )
                     time.sleep(delay)
 
                 try:
-                    response = session.get(
-                        url,
-                        timeout=ARTICLE_FETCH_TIMEOUT,
-                        allow_redirects=True,
-                    )
-                except RequestException as exc:
-                    last_error = f"{url}: {type(exc).__name__}: {exc}"
-                    continue
+                    html, error = backend(url, headers)
+                except (RequestException, httpx.HTTPError, aiohttp.ClientError, OSError) as exc:
+                    error = f"{url}: {type(exc).__name__}: {exc}"
+                    html = ""
 
-                if response.status_code in _RETRYABLE_HTTP_STATUS_CODES:
-                    last_error = f"{url}: HTTP {response.status_code}"
-                    continue
+                strategy_index += 1
 
-                try:
-                    response.raise_for_status()
-                except RequestException as exc:
-                    last_error = f"{url}: {type(exc).__name__}: {exc}"
-                    continue
+                if html:
+                    return html, "", strategy_name
 
-                if not response.text or not response.text.strip():
-                    last_error = f"{url}: empty response body"
-                    continue
+                last_error = f"{strategy_name}: {error or 'unknown error'}"
+                if error and "HTTP 502" not in error and "HTTP 503" not in error:
+                    break
 
-                content_type = (response.headers.get("Content-Type") or "").lower()
-                if (
-                    content_type
-                    and "html" not in content_type
-                    and "text/" not in content_type
-                ):
-                    last_error = f"{url}: unexpected content-type: {content_type}"
-                    continue
-
-                return response.text, ""
-
-    return "", last_error
+    return "", last_error, ""
 
 
 def _decompose_noise(soup: BeautifulSoup) -> None:
@@ -352,11 +513,12 @@ def _resolve_article_html(
 ) -> tuple[str, str, str]:
     """Return (html, source, detail) — prefer scraped webpage, fall back to RSS."""
     fetch_urls = _build_article_fetch_urls(original_url, canonical_url)
-    page_html, fetch_error = _fetch_page_html(fetch_urls)
+    page_html, fetch_error, fetch_method = _fetch_page_html(fetch_urls)
     if page_html:
         article_html = _extract_article_body_html(page_html)
         if len(_clean_html_to_text(article_html)) >= MIN_ARTICLE_TEXT_CHARS:
-            return article_html, "webpage", ""
+            detail = f"via {fetch_method}" if fetch_method else ""
+            return article_html, "webpage", detail
 
         return (
             _extract_raw_html(entry),
@@ -610,6 +772,7 @@ class Command(BaseCommand):
             f"| source={content_source} "
             f"| html={len(raw_html)} chars "
             f"| text={len(clean_text)} chars"
+            + (f" | {scrape_detail}" if scrape_detail and content_source == "webpage" else "")
         ))
         if content_source == "rss":
             self.stderr.write(self.style.WARNING(
