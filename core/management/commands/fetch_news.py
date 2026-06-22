@@ -34,8 +34,10 @@ socket.getaddrinfo = _ipv4_only_getaddrinfo
 import json
 import os
 import re
+import time
 import traceback
 from typing import Any
+from urllib.parse import urlparse
 
 import feedparser
 import httpx
@@ -59,17 +61,18 @@ from core.url_utils import normalize_article_url
 DEFAULT_GEMINI_MODEL = "models/gemini-3.5-flash"
 GEMINI_REQUEST_TIMEOUT = 120  # seconds
 ARTICLE_FETCH_TIMEOUT = 30  # seconds
+ARTICLE_FETCH_RETRIES = 3
+ARTICLE_FETCH_RETRY_DELAY_SECONDS = 1.5
 MIN_ARTICLE_TEXT_CHARS = 100
 TELEGRAM_CHANNEL_ID = "@KhabarVarzeshi"
 
-_DEFAULT_REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (compatible; KhabarVarzeshiBot/1.0; "
-        "+https://khabarvarzeshi.com)"
-    ),
-    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
-}
+_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({403, 408, 429, 500, 502, 503, 504})
 
 # Selectors tried in order when extracting the main article body from a page.
 _ARTICLE_BODY_SELECTORS = (
@@ -174,30 +177,85 @@ def _strip_markdown_fences(text: str) -> str:
     return cleaned.strip()
 
 
-def _fetch_page_html(url: str) -> str:
-    """Download the HTML for an article URL. Returns '' on failure."""
+def _browser_headers(url: str) -> dict[str, str]:
+    """Build browser-like request headers for article page fetches."""
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    return {
+        "User-Agent": _BROWSER_USER_AGENT,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8,"
+            "application/signed-exchange;v=b3;q=0.7"
+        ),
+        "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+        "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Cache-Control": "max-age=0",
+        "Referer": f"{origin}/",
+    }
+
+
+def _fetch_page_html(url: str) -> tuple[str, str]:
+    """Download the HTML for an article URL. Returns (html, failure_reason)."""
     if not url:
-        return ""
+        return "", "empty url"
 
-    try:
-        response = requests.get(
-            url,
-            headers=_DEFAULT_REQUEST_HEADERS,
-            timeout=ARTICLE_FETCH_TIMEOUT,
-            allow_redirects=True,
-        )
-        response.raise_for_status()
-    except RequestException:
-        return ""
+    headers = _browser_headers(url)
+    last_error = "unknown error"
 
-    if not response.text or not response.text.strip():
-        return ""
+    with requests.Session() as session:
+        session.headers.update(headers)
 
-    content_type = (response.headers.get("Content-Type") or "").lower()
-    if content_type and "html" not in content_type and "text/" not in content_type:
-        return ""
+        for attempt in range(1, ARTICLE_FETCH_RETRIES + 1):
+            if attempt > 1:
+                delay = ARTICLE_FETCH_RETRY_DELAY_SECONDS * attempt
+                time.sleep(delay)
 
-    return response.text
+            try:
+                response = session.get(
+                    url,
+                    timeout=ARTICLE_FETCH_TIMEOUT,
+                    allow_redirects=True,
+                )
+            except RequestException as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
+
+            if response.status_code in _RETRYABLE_HTTP_STATUS_CODES:
+                last_error = f"HTTP {response.status_code}"
+                continue
+
+            try:
+                response.raise_for_status()
+            except RequestException as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
+
+            if not response.text or not response.text.strip():
+                last_error = "empty response body"
+                continue
+
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            if (
+                content_type
+                and "html" not in content_type
+                and "text/" not in content_type
+            ):
+                last_error = f"unexpected content-type: {content_type}"
+                continue
+
+            return response.text, ""
+
+    return "", last_error
 
 
 def _decompose_noise(soup: BeautifulSoup) -> None:
@@ -239,15 +297,22 @@ def _extract_article_body_html(page_html: str) -> str:
 def _resolve_article_html(
     url: str,
     entry: feedparser.FeedParserDict,
-) -> tuple[str, str]:
-    """Return (html, source) — prefer scraped webpage, fall back to RSS."""
-    page_html = _fetch_page_html(url)
+) -> tuple[str, str, str]:
+    """Return (html, source, detail) — prefer scraped webpage, fall back to RSS."""
+    page_html, fetch_error = _fetch_page_html(url)
     if page_html:
         article_html = _extract_article_body_html(page_html)
         if len(_clean_html_to_text(article_html)) >= MIN_ARTICLE_TEXT_CHARS:
-            return article_html, "webpage"
+            return article_html, "webpage", ""
 
-    return _extract_raw_html(entry), "rss"
+        return (
+            _extract_raw_html(entry),
+            "rss",
+            "webpage downloaded but article body was too short",
+        )
+
+    detail = fetch_error or "webpage download failed"
+    return _extract_raw_html(entry), "rss", detail
 
 
 def _extract_raw_html(entry: feedparser.FeedParserDict) -> str:
@@ -480,7 +545,9 @@ class Command(BaseCommand):
             stats["skipped"] += 1
             return stats
 
-        raw_html, content_source = _resolve_article_html(canonical_url, entry)
+        raw_html, content_source, scrape_detail = _resolve_article_html(
+            canonical_url, entry,
+        )
         clean_text = _clean_html_to_text(raw_html)
         if not clean_text:
             clean_text = title
@@ -494,7 +561,7 @@ class Command(BaseCommand):
         if content_source == "rss":
             self.stderr.write(self.style.WARNING(
                 f"  ! webpage scrape unavailable for '{title[:60]}' "
-                f"— using RSS fallback."
+                f"— using RSS fallback ({scrape_detail})."
             ))
 
         image_candidates = _extract_image_candidates(entry, raw_html)
