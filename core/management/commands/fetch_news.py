@@ -416,6 +416,7 @@ class Command(BaseCommand):
                         f"({canonical_url})"
                     )
                 )
+
                 stats["skipped"] += 1
                 return stats
 

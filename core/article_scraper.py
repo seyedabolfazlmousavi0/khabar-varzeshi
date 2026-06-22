@@ -161,12 +161,31 @@ def _create_stealth_chrome_driver(
     (log or _default_scrape_log)("selenium: building headless Chrome options")
 
     options = Options()
+    options.page_load_strategy = "eager"
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("--blink-settings=imagesEnabled=false")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-component-extensions-with-background-pages")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-client-side-phishing-detection")
+    options.add_argument("--disable-hang-monitor")
+    options.add_argument("--disable-popup-blocking")
+    options.add_argument("--disable-prompt-on-repost")
+    options.add_argument("--disable-translate")
+    options.add_argument("--no-first-run")
+    options.add_argument("--metrics-recording-only")
+    options.add_argument("--safebrowsing-disable-auto-update")
+    options.add_argument(
+        "--disable-features=TranslateUI,InterestFeedContentSuggestions,OptimizationHints"
+    )
     options.add_argument("--lang=fa-IR")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--log-level=3")
@@ -175,6 +194,16 @@ def _create_stealth_chrome_driver(
         ["enable-automation", "enable-logging"],
     )
     options.add_experimental_option("useAutomationExtension", False)
+    options.add_experimental_option(
+        "prefs",
+        {
+            "profile.managed_default_content_settings.images": 2,
+            "profile.default_content_setting_values.notifications": 2,
+            "profile.default_content_setting_values.geolocation": 2,
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+        },
+    )
 
     if chrome_binary:
         options.binary_location = str(chrome_binary)
@@ -199,6 +228,27 @@ def _create_stealth_chrome_driver(
             "userAgent": user_agent,
             "acceptLanguage": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
             "platform": "Windows",
+        },
+    )
+    driver.execute_cdp_cmd("Network.enable", {})
+    driver.execute_cdp_cmd(
+        "Network.setBlockedURLs",
+        {
+            "urls": [
+                "*.png",
+                "*.jpg",
+                "*.jpeg",
+                "*.gif",
+                "*.webp",
+                "*.svg",
+                "*.ico",
+                "*.mp4",
+                "*.webm",
+                "*.mp3",
+                "*google-analytics*",
+                "*googletagmanager*",
+                "*doubleclick*",
+            ],
         },
     )
     driver.execute_cdp_cmd(
@@ -245,10 +295,12 @@ def _fetch_via_selenium(
 
         ready_timeout = float(settings["ready_wait_timeout"])
         (log or _default_scrape_log)(
-            f"selenium: waiting for document.readyState (timeout={ready_timeout}s)"
+            f"selenium: waiting for DOM interactive/complete "
+            f"(eager strategy, timeout={ready_timeout}s)"
         )
         WebDriverWait(driver, ready_timeout).until(
-            lambda d: d.execute_script("return document.readyState") == "complete"
+            lambda d: d.execute_script("return document.readyState")
+            in ("interactive", "complete")
         )
 
         settle = random.uniform(1.0, 2.5)
