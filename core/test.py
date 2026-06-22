@@ -1,15 +1,15 @@
-from google.genai import types, Client
+import requests
 
-# تنظیم کلاینت برای استفاده از API گپ جی‌پی‌تی
-client = Client(
-    api_key='sk-eJGoGzKthRUB6KXLLxpoFpEf00ju8NKzJksaRK1hiAgk2lra',
-    http_options=types.HttpOptions(base_url='https://api.gapgpt.app/')
-)
+url = "https://www.tasnimnews.ir/fa/news/1405/04/01/3623426/"
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"
+}
 
-# استفاده از مدل
-response = client.models.generate_content(
-    model='gemini-2.5-pro',
-    contents='سلام!'
-)
-
-print(response.text)
+try:
+    print("Sending request to Tasnim...")
+    response = requests.get(url, headers=headers, timeout=10)
+    print(f"Status Code: {response.status_code}")
+    print(f"HTML Length: {len(response.text)}")
+    print("First 200 chars of HTML:", response.text[:200].strip())
+except Exception as e:
+    print(f"Error occurred: {e}")
