@@ -32,13 +32,15 @@ socket.getaddrinfo = _ipv4_only_getaddrinfo
 # -----------------------------------------------------------------------------
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
+import sys
 import time
 import traceback
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypeAlias
 from urllib.parse import urlparse, urlunparse
 
 import aiohttp
@@ -63,12 +65,21 @@ from core.url_utils import normalize_article_url
 
 DEFAULT_GEMINI_MODEL = "models/gemini-3.5-flash"
 GEMINI_REQUEST_TIMEOUT = 120  # seconds
-ARTICLE_FETCH_TIMEOUT = 30  # seconds
-ARTICLE_FETCH_RETRIES = 3
-ARTICLE_FETCH_RETRY_DELAY_SECONDS = 1.5
-ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS = 0.75
+ARTICLE_FETCH_TIMEOUT = 5  # seconds — strict per-request read timeout
+ARTICLE_FETCH_CONNECT_TIMEOUT = 3  # seconds
+ARTICLE_FETCH_HARD_TIMEOUT_PADDING = 2  # extra seconds for thread-level kill
+ARTICLE_FETCH_RETRIES = 1  # cycle strategies instead of hammering one backend
+ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS = 0.5
 MIN_ARTICLE_TEXT_CHARS = 100
 TELEGRAM_CHANNEL_ID = "@KhabarVarzeshi"
+
+ScrapeLogger: TypeAlias = Callable[[str, bool], None] | None
+
+_REQUESTS_TIMEOUT = (ARTICLE_FETCH_CONNECT_TIMEOUT, ARTICLE_FETCH_TIMEOUT)
+_HTTPX_TIMEOUT = httpx.Timeout(
+    ARTICLE_FETCH_TIMEOUT,
+    connect=ARTICLE_FETCH_CONNECT_TIMEOUT,
+)
 
 _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -188,6 +199,12 @@ def _strip_markdown_fences(text: str) -> str:
     return cleaned.strip()
 
 
+def _default_scrape_log(message: str, error: bool = False) -> None:
+    stream = sys.stderr if error else sys.stdout
+    timestamp = time.strftime("%H:%M:%S")
+    print(f"[{timestamp}] [scrape] {message}", file=stream, flush=True)
+
+
 def _browser_headers_chrome(url: str) -> dict[str, str]:
     """Chrome-like headers simulating in-site navigation."""
     parsed = urlparse(url)
@@ -286,7 +303,7 @@ def _fetch_via_requests_session(url: str, headers: dict[str, str]) -> tuple[str,
         session.headers.update(headers)
         response = session.get(
             url,
-            timeout=ARTICLE_FETCH_TIMEOUT,
+            timeout=_REQUESTS_TIMEOUT,
             allow_redirects=True,
         )
         return _validate_fetched_page(
@@ -301,7 +318,7 @@ def _fetch_via_requests_plain(url: str, headers: dict[str, str]) -> tuple[str, s
     response = requests.get(
         url,
         headers=headers,
-        timeout=ARTICLE_FETCH_TIMEOUT,
+        timeout=_REQUESTS_TIMEOUT,
         allow_redirects=True,
     )
     return _validate_fetched_page(
@@ -315,7 +332,7 @@ def _fetch_via_requests_plain(url: str, headers: dict[str, str]) -> tuple[str, s
 def _fetch_via_httpx(url: str, headers: dict[str, str], *, http2: bool = False) -> tuple[str, str]:
     with httpx.Client(
         headers=headers,
-        timeout=ARTICLE_FETCH_TIMEOUT,
+        timeout=_HTTPX_TIMEOUT,
         follow_redirects=True,
         http2=http2,
         trust_env=False,
@@ -330,7 +347,11 @@ def _fetch_via_httpx(url: str, headers: dict[str, str], *, http2: bool = False) 
 
 
 async def _fetch_via_aiohttp_async(url: str, headers: dict[str, str]) -> tuple[str, str]:
-    timeout = aiohttp.ClientTimeout(total=ARTICLE_FETCH_TIMEOUT)
+    timeout = aiohttp.ClientTimeout(
+        total=ARTICLE_FETCH_TIMEOUT,
+        connect=ARTICLE_FETCH_CONNECT_TIMEOUT,
+        sock_read=ARTICLE_FETCH_TIMEOUT,
+    )
     connector = aiohttp.TCPConnector(ssl=True, force_close=True)
     async with aiohttp.ClientSession(
         headers=headers,
@@ -348,6 +369,11 @@ async def _fetch_via_aiohttp_async(url: str, headers: dict[str, str]) -> tuple[s
             )
 
 
+def _fetch_via_aiohttp_in_thread(url: str, headers: dict[str, str]) -> tuple[str, str]:
+    """Run aiohttp in an isolated thread to avoid blocking the main thread."""
+    return asyncio.run(_fetch_via_aiohttp_async(url, headers))
+
+
 def _fetch_via_httpx_http2(url: str, headers: dict[str, str]) -> tuple[str, str]:
     try:
         return _fetch_via_httpx(url, headers, http2=True)
@@ -357,8 +383,8 @@ def _fetch_via_httpx_http2(url: str, headers: dict[str, str]) -> tuple[str, str]
 
 def _fetch_via_aiohttp(url: str, headers: dict[str, str]) -> tuple[str, str]:
     try:
-        return asyncio.run(_fetch_via_aiohttp_async(url, headers))
-    except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+        return _fetch_via_aiohttp_in_thread(url, headers)
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, RuntimeError) as exc:
         return "", f"{url}: {type(exc).__name__}: {exc}"
 
 
@@ -428,45 +454,122 @@ def _build_article_fetch_urls(original_url: str, canonical_url: str) -> list[str
     return candidates
 
 
-def _fetch_page_html(urls: str | list[str]) -> tuple[str, str, str]:
+def _invoke_fetch_backend(
+    backend: FetchBackend,
+    url: str,
+    headers: dict[str, str],
+    strategy_name: str,
+) -> tuple[str, str]:
+    """Run a fetch backend in a worker thread with a hard wall-clock timeout."""
+    hard_limit = (
+        ARTICLE_FETCH_TIMEOUT
+        + ARTICLE_FETCH_CONNECT_TIMEOUT
+        + ARTICLE_FETCH_HARD_TIMEOUT_PADDING
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(backend, url, headers)
+        try:
+            return future.result(timeout=hard_limit)
+        except concurrent.futures.TimeoutError:
+            return "", (
+                f"{url}: hard timeout after {hard_limit}s "
+                f"(strategy={strategy_name})"
+            )
+        except Exception as exc:
+            return "", f"{url}: {type(exc).__name__}: {exc} (strategy={strategy_name})"
+
+
+def _fetch_page_html(
+    urls: str | list[str],
+    scrape_log: ScrapeLogger = None,
+) -> tuple[str, str, str]:
     """Download article HTML, cycling fetch backends until one succeeds."""
+    log = scrape_log or _default_scrape_log
+
     if isinstance(urls, str):
         url_list = [urls]
     else:
         url_list = [url for url in urls if url]
 
     if not url_list:
+        log("no URLs to fetch", error=True)
         return "", "empty url", ""
 
-    last_error = "unknown error"
-    strategy_index = 0
+    total_strategies = len(_FETCH_STRATEGIES)
+    log(
+        f"starting fetch matrix | urls={len(url_list)} "
+        f"| strategies={total_strategies} "
+        f"| timeout={ARTICLE_FETCH_TIMEOUT}s"
+    )
 
-    for url in url_list:
-        for strategy_name, header_profile, backend in _FETCH_STRATEGIES:
+    last_error = "unknown error"
+    strategy_step = 0
+
+    for url_index, url in enumerate(url_list, start=1):
+        log(f"URL {url_index}/{len(url_list)}: {url}")
+
+        for strategy_index, (strategy_name, header_profile, backend) in enumerate(
+            _FETCH_STRATEGIES,
+            start=1,
+        ):
+            strategy_step += 1
             headers = header_profile(url)
+            user_agent = headers.get("User-Agent", "")
+            referer = headers.get("Referer", "—")
+
+            log(
+                f"strategy {strategy_index}/{total_strategies} "
+                f"(step {strategy_step}): {strategy_name}"
+            )
+            log(
+                f"  headers | UA={user_agent[:72]} "
+                f"| Referer={referer} "
+                f"| Accept-Language={headers.get('Accept-Language', '—')}"
+            )
 
             for attempt in range(1, ARTICLE_FETCH_RETRIES + 1):
-                if strategy_index > 0 or attempt > 1:
-                    delay = ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS * (
-                        strategy_index + attempt
+                if attempt > 1:
+                    log(f"  retry {attempt}/{ARTICLE_FETCH_RETRIES} for {strategy_name}")
+                    time.sleep(ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS)
+
+                if strategy_step > 1 and attempt == 1:
+                    log(
+                        f"  waiting {ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS}s "
+                        "before dispatch"
                     )
-                    time.sleep(delay)
+                    time.sleep(ARTICLE_FETCH_INTER_STRATEGY_DELAY_SECONDS)
 
-                try:
-                    html, error = backend(url, headers)
-                except (RequestException, httpx.HTTPError, aiohttp.ClientError, OSError) as exc:
-                    error = f"{url}: {type(exc).__name__}: {exc}"
-                    html = ""
+                log(
+                    f"  → dispatching HTTP request "
+                    f"(connect={ARTICLE_FETCH_CONNECT_TIMEOUT}s, "
+                    f"read={ARTICLE_FETCH_TIMEOUT}s)"
+                )
+                started = time.monotonic()
 
-                strategy_index += 1
+                html, error = _invoke_fetch_backend(
+                    backend,
+                    url,
+                    headers,
+                    strategy_name,
+                )
+
+                elapsed = time.monotonic() - started
 
                 if html:
+                    log(
+                        f"  ✓ SUCCESS in {elapsed:.2f}s | "
+                        f"bytes={len(html)} | strategy={strategy_name}"
+                    )
                     return html, "", strategy_name
 
                 last_error = f"{strategy_name}: {error or 'unknown error'}"
+                log(f"  ✗ FAILED in {elapsed:.2f}s | {last_error}", error=True)
+
                 if error and "HTTP 502" not in error and "HTTP 503" not in error:
                     break
 
+    log(f"all strategies exhausted | last_error={last_error}", error=True)
     return "", last_error, ""
 
 
@@ -510,16 +613,36 @@ def _resolve_article_html(
     original_url: str,
     canonical_url: str,
     entry: feedparser.FeedParserDict,
+    scrape_log: ScrapeLogger = None,
 ) -> tuple[str, str, str]:
     """Return (html, source, detail) — prefer scraped webpage, fall back to RSS."""
+    log = scrape_log or _default_scrape_log
     fetch_urls = _build_article_fetch_urls(original_url, canonical_url)
-    page_html, fetch_error, fetch_method = _fetch_page_html(fetch_urls)
+    log(
+        f"resolve article | original={original_url} "
+        f"| canonical={canonical_url} "
+        f"| candidates={len(fetch_urls)}"
+    )
+    for index, candidate in enumerate(fetch_urls, start=1):
+        log(f"  candidate {index}: {candidate}")
+
+    page_html, fetch_error, fetch_method = _fetch_page_html(
+        fetch_urls,
+        scrape_log=log,
+    )
     if page_html:
+        log("extracting article body from downloaded HTML")
         article_html = _extract_article_body_html(page_html)
-        if len(_clean_html_to_text(article_html)) >= MIN_ARTICLE_TEXT_CHARS:
+        article_text_len = len(_clean_html_to_text(article_html))
+        log(f"extracted body text length={article_text_len}")
+        if article_text_len >= MIN_ARTICLE_TEXT_CHARS:
             detail = f"via {fetch_method}" if fetch_method else ""
             return article_html, "webpage", detail
 
+        log(
+            "webpage downloaded but extracted body was too short — RSS fallback",
+            error=True,
+        )
         return (
             _extract_raw_html(entry),
             "rss",
@@ -527,6 +650,7 @@ def _resolve_article_html(
         )
 
     detail = fetch_error or "webpage download failed"
+    log(f"webpage download failed — RSS fallback ({detail})", error=True)
     return _extract_raw_html(entry), "rss", detail
 
 
@@ -724,6 +848,13 @@ class Command(BaseCommand):
             )
         )
 
+    def _scrape_log(self, message: str, error: bool = False) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        stream = self.stderr if error else self.stdout
+        style = self.style.ERROR if error else self.style.HTTP_INFO
+        stream.write(style(f"  [{timestamp}] [scrape] {message}") + "\n")
+        stream.flush()
+
     def _process_entry(
         self,
         entry: feedparser.FeedParserDict,
@@ -761,7 +892,7 @@ class Command(BaseCommand):
             return stats
 
         raw_html, content_source, scrape_detail = _resolve_article_html(
-            link, canonical_url, entry,
+            link, canonical_url, entry, scrape_log=self._scrape_log,
         )
         clean_text = _clean_html_to_text(raw_html)
         if not clean_text:
