@@ -37,7 +37,7 @@ import re
 import time
 import traceback
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import feedparser
 import httpx
@@ -76,6 +76,9 @@ _RETRYABLE_HTTP_STATUS_CODES = frozenset({403, 408, 429, 500, 502, 503, 504})
 
 # Selectors tried in order when extracting the main article body from a page.
 _ARTICLE_BODY_SELECTORS = (
+    ".story-text",
+    ".story-body",
+    ".story",
     "article",
     "[role='main']",
     "main",
@@ -189,7 +192,7 @@ def _browser_headers(url: str) -> dict[str, str]:
             "application/signed-exchange;v=b3;q=0.7"
         ),
         "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
@@ -204,56 +207,104 @@ def _browser_headers(url: str) -> dict[str, str]:
     }
 
 
-def _fetch_page_html(url: str) -> tuple[str, str]:
-    """Download the HTML for an article URL. Returns (html, failure_reason)."""
-    if not url:
+def _build_article_fetch_urls(original_url: str, canonical_url: str) -> list[str]:
+    """Return article URLs to try, preferring the RSS link over normalized form.
+
+    Normalization strips ``www.`` and trailing slashes for deduplication, but
+    some publishers (e.g. Tasnim) only serve pages on ``www`` and return 502 on
+    the bare hostname. Always try the original RSS URL first, then safe variants.
+    """
+    candidates: list[str] = []
+
+    def add(url: str) -> None:
+        url = (url or "").strip()
+        if url and url not in candidates:
+            candidates.append(url)
+
+    add(original_url)
+
+    original_host = urlparse(original_url).netloc
+    canonical = urlparse(canonical_url)
+    if original_host and canonical.netloc and original_host != canonical.netloc:
+        add(urlunparse(canonical._replace(netloc=original_host)))
+
+    add(canonical_url)
+
+    for url in list(candidates):
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        if host and not host.startswith("www."):
+            add(urlunparse(parsed._replace(netloc=f"www.{host}")))
+
+    for url in list(candidates):
+        parsed = urlparse(url)
+        path = parsed.path or ""
+        if not path or path == "/":
+            continue
+        if path.endswith("/"):
+            add(urlunparse(parsed._replace(path=path.rstrip("/"))))
+        else:
+            add(urlunparse(parsed._replace(path=f"{path}/")))
+
+    return candidates
+
+
+def _fetch_page_html(urls: str | list[str]) -> tuple[str, str]:
+    """Download article HTML. Tries each URL with retries. Returns (html, error)."""
+    if isinstance(urls, str):
+        url_list = [urls]
+    else:
+        url_list = [url for url in urls if url]
+
+    if not url_list:
         return "", "empty url"
 
-    headers = _browser_headers(url)
     last_error = "unknown error"
 
     with requests.Session() as session:
-        session.headers.update(headers)
+        for url in url_list:
+            session.headers.clear()
+            session.headers.update(_browser_headers(url))
 
-        for attempt in range(1, ARTICLE_FETCH_RETRIES + 1):
-            if attempt > 1:
-                delay = ARTICLE_FETCH_RETRY_DELAY_SECONDS * attempt
-                time.sleep(delay)
+            for attempt in range(1, ARTICLE_FETCH_RETRIES + 1):
+                if attempt > 1:
+                    delay = ARTICLE_FETCH_RETRY_DELAY_SECONDS * attempt
+                    time.sleep(delay)
 
-            try:
-                response = session.get(
-                    url,
-                    timeout=ARTICLE_FETCH_TIMEOUT,
-                    allow_redirects=True,
-                )
-            except RequestException as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                continue
+                try:
+                    response = session.get(
+                        url,
+                        timeout=ARTICLE_FETCH_TIMEOUT,
+                        allow_redirects=True,
+                    )
+                except RequestException as exc:
+                    last_error = f"{url}: {type(exc).__name__}: {exc}"
+                    continue
 
-            if response.status_code in _RETRYABLE_HTTP_STATUS_CODES:
-                last_error = f"HTTP {response.status_code}"
-                continue
+                if response.status_code in _RETRYABLE_HTTP_STATUS_CODES:
+                    last_error = f"{url}: HTTP {response.status_code}"
+                    continue
 
-            try:
-                response.raise_for_status()
-            except RequestException as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-                continue
+                try:
+                    response.raise_for_status()
+                except RequestException as exc:
+                    last_error = f"{url}: {type(exc).__name__}: {exc}"
+                    continue
 
-            if not response.text or not response.text.strip():
-                last_error = "empty response body"
-                continue
+                if not response.text or not response.text.strip():
+                    last_error = f"{url}: empty response body"
+                    continue
 
-            content_type = (response.headers.get("Content-Type") or "").lower()
-            if (
-                content_type
-                and "html" not in content_type
-                and "text/" not in content_type
-            ):
-                last_error = f"unexpected content-type: {content_type}"
-                continue
+                content_type = (response.headers.get("Content-Type") or "").lower()
+                if (
+                    content_type
+                    and "html" not in content_type
+                    and "text/" not in content_type
+                ):
+                    last_error = f"{url}: unexpected content-type: {content_type}"
+                    continue
 
-            return response.text, ""
+                return response.text, ""
 
     return "", last_error
 
@@ -295,11 +346,13 @@ def _extract_article_body_html(page_html: str) -> str:
 
 
 def _resolve_article_html(
-    url: str,
+    original_url: str,
+    canonical_url: str,
     entry: feedparser.FeedParserDict,
 ) -> tuple[str, str, str]:
     """Return (html, source, detail) — prefer scraped webpage, fall back to RSS."""
-    page_html, fetch_error = _fetch_page_html(url)
+    fetch_urls = _build_article_fetch_urls(original_url, canonical_url)
+    page_html, fetch_error = _fetch_page_html(fetch_urls)
     if page_html:
         article_html = _extract_article_body_html(page_html)
         if len(_clean_html_to_text(article_html)) >= MIN_ARTICLE_TEXT_CHARS:
@@ -546,7 +599,7 @@ class Command(BaseCommand):
             return stats
 
         raw_html, content_source, scrape_detail = _resolve_article_html(
-            canonical_url, entry,
+            link, canonical_url, entry,
         )
         clean_text = _clean_html_to_text(raw_html)
         if not clean_text:
