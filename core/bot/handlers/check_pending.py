@@ -9,15 +9,15 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from asgiref.sync import sync_to_async
+from django.core.management import call_command
 
-from core.bot.auth import AdminFilter
+from core.bot.auth import AdminFilter, is_admin_user
 from core.bot.config import BotConfig
 from core.bot.keyboards import (
     CHECK_PENDING_BUTTON,
     CheckPendingButtonFilter,
-    admin_main_menu,
     article_review_keyboard,
-    is_check_pending_button,
+    main_menu,
     normalize_button_text,
 )
 from core.bot.services import (
@@ -139,32 +139,25 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         await _send_pending_batch(message, config)
         print("[check_pending] cmd_check_pending: after _send_pending_batch — EXIT", flush=True)
 
-    @router.message(CheckPendingButtonFilter(), admin_filter)
+    @router.message(CheckPendingButtonFilter())
     async def btn_check_pending(message: Message, state: FSMContext) -> None:
         print("[check_pending] btn_check_pending: ENTER", flush=True)
-        print(
-            f"[check_pending] btn_check_pending: message.text={message.text!r} "
-            f"normalized={normalize_button_text(message.text)!r} "
-            f"expected={CHECK_PENDING_BUTTON!r} "
-            f"matches={is_check_pending_button(message.text)}",
-            flush=True,
-        )
-        print("[check_pending] btn_check_pending: before state.clear()", flush=True)
         await state.clear()
-        print("[check_pending] btn_check_pending: after state.clear()", flush=True)
+
         if normalize_button_text(message.text) != normalize_button_text(CHECK_PENDING_BUTTON):
-            print(
-                "[check_pending] btn_check_pending: stale keyboard label detected — "
-                "refreshing reply keyboard",
-                flush=True,
-            )
             await message.answer(
                 "⌨️ منوی پایین به‌روزرسانی شد.",
-                reply_markup=admin_main_menu(),
+                reply_markup=main_menu(),
             )
-        print("[check_pending] btn_check_pending: before _send_pending_batch", flush=True)
-        await _send_pending_batch(message, config)
-        print("[check_pending] btn_check_pending: after _send_pending_batch — EXIT", flush=True)
+
+        if not is_admin_user(message.from_user, config.allowed_admin_ids):
+            await message.answer(
+                "📌 فقط  ادمین ها دسترسی دارند به این دکمه",
+                reply_markup=main_menu(),
+            )
+            return
+
+        await sync_to_async(call_command)("fetch_news")
 
     print("[check_pending] build_router: EXIT (handlers registered)", flush=True)
     return router

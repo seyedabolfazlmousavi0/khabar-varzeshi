@@ -10,7 +10,7 @@ from asgiref.sync import sync_to_async
 
 from core.bot.auth import AdminFilter
 from core.bot.config import BotConfig
-from core.bot.keyboards import CHECK_PENDING_BUTTON, admin_main_menu, article_review_keyboard, remove_reply_keyboard
+from core.bot.keyboards import CHECK_PENDING_BUTTON, article_review_keyboard, main_menu
 from core.bot.services import load_article_for_bot, refresh_article_preview
 
 
@@ -22,16 +22,16 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         if message.from_user and message.from_user.id in config.allowed_admin_ids:
             await message.answer(
                 "سلام! من ربات سردبیر خبرورزشی هستم.\n\n"
-                f"برای بررسی اخبار در انتظار تایید، دکمه <b>{CHECK_PENDING_BUTTON}</b> "
+                f"برای دریافت آخرین اخبار، دکمه <b>{CHECK_PENDING_BUTTON}</b> "
                 "یا دستور /check_pending را بزنید.",
                 parse_mode="HTML",
-                reply_markup=admin_main_menu(),
+                reply_markup=main_menu(),
             )
             return
 
         await message.answer(
-            "این ربات فقط برای سردبیران مجاز است.",
-            reply_markup=remove_reply_keyboard(),
+            "سلام! به ربات خبرورزشی خوش آمدید.",
+            reply_markup=main_menu(),
         )
 
     @router.message(Command("cancel"), admin_filter)
@@ -40,7 +40,7 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         if current is None:
             await message.answer(
                 "عملیاتی برای لغو وجود ندارد.",
-                reply_markup=admin_main_menu(),
+                reply_markup=main_menu(),
             )
             return
 
@@ -66,7 +66,7 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         await message.answer(
             "عملیات لغو شد.",
-            reply_markup=admin_main_menu(),
+            reply_markup=main_menu(),
         )
 
     return router

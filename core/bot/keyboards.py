@@ -16,12 +16,13 @@ from aiogram.types import (
 )
 
 # Single source of truth for the reply-keyboard label and text-router matching.
-CHECK_PENDING_BUTTON = "📋 بررسی آخرین اخبار"
+CHECK_PENDING_BUTTON = "بررسی آخرین اخبار 📋"
 
-# Telegram clients may cache an older reply keyboard until the admin sends /start.
+# Telegram clients may cache an older reply keyboard until the user sends /start.
 _CHECK_PENDING_ALIASES = frozenset(
     {
         CHECK_PENDING_BUTTON,
+        "📋 بررسی آخرین اخبار",
         "📋 Check Pending",
     }
 )
@@ -57,13 +58,18 @@ ACTION_EDIT = "edit"
 ACTION_ADD_LINK = "addlink"
 
 
-def admin_main_menu() -> ReplyKeyboardMarkup:
-    """Persistent bottom menu visible only to authorized admins."""
+def main_menu() -> ReplyKeyboardMarkup:
+    """Persistent bottom menu visible to all users."""
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=CHECK_PENDING_BUTTON)]],
         resize_keyboard=True,
         is_persistent=True,
     )
+
+
+def admin_main_menu() -> ReplyKeyboardMarkup:
+    """Alias for :func:`main_menu` (kept for existing call sites)."""
+    return main_menu()
 
 
 def remove_reply_keyboard() -> ReplyKeyboardRemove:

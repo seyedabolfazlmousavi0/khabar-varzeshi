@@ -56,7 +56,7 @@ from core.models import NewsArticle, RssSource
 from core.url_utils import normalize_article_url
 
 
-DEFAULT_GEMINI_MODEL = "models/gemini-2.5-flash"
+DEFAULT_GEMINI_MODEL = "models/gemini-2.5-flash-lite"
 GEMINI_REQUEST_TIMEOUT = 120  # seconds
 TELEGRAM_CHANNEL_ID = "@KhabarVarzeshi"
 
