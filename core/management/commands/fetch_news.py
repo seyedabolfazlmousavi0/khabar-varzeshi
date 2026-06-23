@@ -56,7 +56,7 @@ from core.models import NewsArticle, RssSource
 from core.url_utils import normalize_article_url
 
 
-DEFAULT_GEMINI_MODEL = "models/gemini-3.5-flash"
+DEFAULT_GEMINI_MODEL = "models/gemini-2.5-flash"
 GEMINI_REQUEST_TIMEOUT = 120  # seconds
 TELEGRAM_CHANNEL_ID = "@KhabarVarzeshi"
 
@@ -78,31 +78,31 @@ REQUIRED_KEYS = ("site_title", "site_lead", "site_body", "telegram_text")
 # Matches an opening ``` or ```json fence, and the closing ``` fence.
 _FENCE_RE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 
-
 PROMPT_TEMPLATE = """\
-شما یک سردبیر حرفه‌ای اخبار ورزشی هستید که به زبان فارسی روان و جذاب می‌نویسید.
-وظیفه‌ی شما این است که خبر زیر را با کلمات خودتان بازنویسی کنید و خروجی را
-**دقیقاً** به صورت یک شیء JSON معتبر و بدون هیچ متن اضافه برگردانید.
+You are the editor-in-chief of a highly prestigious, official, and professional international sports news outlet. Your task is to analyze the raw English news data provided below and rewrite it into a completely new, creative, and structured Persian (Farsi) news piece.
 
-شیء JSON باید **فقط** شامل این کلیدها باشد (نه بیشتر، نه کمتر):
+⚠️ CRITICAL RULE - ABSOLUTE BAN ON EXAGGERATION AND SENSATIONALISM:
+Do NOT use cheesy, sensational, or exaggerated clickbait phrases in Persian like "بمب منفجر شد", "زلزله به پا کرد", "شوک بزرگ", "کولاک کرد", or "طوفان". The tone must remain strictly serious, dignified, professional, and objective in all fields. No slang or overly informal Persian words are allowed.
 
-- "site_title": یک تیتر جذاب، سئو-فرندلی و فارسی برای سایت (string).
-- "site_lead": لید کوتاه (یک تا دو جمله) به فارسی که خلاصه‌ی خبر را بیان کند (string).
-- "site_body": متن کامل خبر به صورت HTML فارسی. از تگ‌های <h2> برای زیرعنوان‌های
-  سئو-فرندلی و از <p> برای پاراگراف‌ها استفاده کن. حداقل دو زیرعنوان <h2> داشته باش.
-- "telegram_text": یک خلاصه‌ی کوتاه و جذاب برای کانال تلگرام به فارسی. این متن
-  **حتماً** باید با یک خط جدید به ID کانال "{channel_id}" ختم شود.
+Return the output EXACTLY as a valid JSON object with NO markdown code fences (do NOT use ```json or 
+```), and NO extra text before or after the JSON. 
 
-قواعد سختگیرانه:
-1. خروجی باید *فقط* JSON خام باشد. هیچ متن، توضیح، یا کد فِنس مارک‌داون مثل
-   ```json قبل یا بعدش قرار نده.
-2. تمام مقادیر باید رشته‌ی (string) معتبر JSON باشند (نقل‌قول‌های دوتایی escape شود).
-3. اطلاعات نادرست از خودت اضافه نکن؛ فقط بر اساس محتوای زیر بنویس.
+The JSON object must contain ONLY these keys:
+
+- "site_title": A serious, high-quality, and SEO-friendly title written entirely in Persian (string). It must highlight the core event professionally without exaggeration.
+- "site_lead": A professional, concise lead (1-2 sentences) in formal Persian that summarizes the news directly (string).
+- "site_body": The full news article formatted in Persian HTML. Use <h2> tags for professional subheadings that you design yourself, and <p> tags for paragraphs. Include at least two <h2> subheadings.
+- "telegram_text": A specialized text for the Telegram channel (string). It must be written in formal, sleek, journalistic Persian with a fast-paced rhythm. Summarize the news line-by-line so the reader gets the core facts quickly. Do NOT copy the site content. EMOJI LIMIT: Maximum 1 or 2 official and clean emojis (like ⚽ or 📌) just for formatting. This text MUST end with a new line containing the exact channel ID: "{channel_id}".
+
+Strict Language Rules:
+1. NO EXACT TRANSLATION: Do not translate line-by-line. Digest the facts and write a brand new piece using rich, formal, and authentic Persian vocabulary.
+2. ABSOLUTE PERSIAN OUTPUT: Every single value inside the JSON must be entirely in Persian. Do not include any English words, abbreviations, or characters. All players and team names must be transliterated phonetically into Persian (e.g., "لیونل مسی", "توماس توخل").
+3. Ensure all double quotes inside the strings are properly escaped to maintain valid JSON.
 
 ---
-عنوان اصلی: {title}
-منبع: {source_name}
-محتوای اصلی:
+Original Title: {title}
+Source: {source_name}
+Raw Content:
 {content}
 ---
 """
