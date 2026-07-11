@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiogram import F, Router
@@ -15,7 +16,9 @@ from core.bot.keyboards import (
     ACTION_ADD_LINK,
     ACTION_APPROVE,
     ACTION_EDIT,
+    ACTION_PUBLISH_SITE,
     ACTION_REJECT,
+    article_review_keyboard,
     edit_force_reply,
 )
 from core.bot.services import (
@@ -26,6 +29,7 @@ from core.bot.services import (
     send_with_optional_image,
     update_review_message,
 )
+from core.bot.site_publish import is_site_publish_in_progress, run_site_publish_job
 from core.bot.states import AddLinkStates, EditNewsStates
 from core.bot.text_compose import (
     SITE_LINK_ANCHOR,
@@ -239,6 +243,75 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             f"متن لینک ثابت خواهد بود: «{SITE_LINK_ANCHOR}»\n"
             "برای لغو: /cancel",
             parse_mode="HTML",
+        )
+
+    @router.callback_query(F.data.startswith(f"{ACTION_PUBLISH_SITE}:"))
+    async def on_publish_site(callback: CallbackQuery, state: FSMContext) -> None:
+        if not is_admin_user(callback.from_user, config.allowed_admin_ids):
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
+            return
+
+        await state.clear()
+
+        article_id = _parse_article_id(callback.data)
+        if article_id is None or callback.message is None or callback.from_user is None:
+            await callback.answer("داده نامعتبر.")
+            return
+
+        if is_site_publish_in_progress(article_id):
+            await callback.answer("انتشار این خبر در حال انجام است.", show_alert=True)
+            return
+
+        try:
+            article = await sync_to_async(load_article_for_bot)(article_id)
+        except NewsArticle.DoesNotExist:
+            await callback.answer("خبر پیدا نشد.")
+            await finalize_review_message(
+                callback.bot,
+                callback.message,
+                suffix="⚠️ این خبر دیگر در پایگاه داده وجود ندارد.",
+            )
+            return
+
+        if article.status != NewsArticle.Status.PENDING:
+            await callback.answer("این خبر دیگر در انتظار تایید نیست.")
+            return
+
+        missing_fields: list[str] = []
+        if not (article.site_title or "").strip():
+            missing_fields.append("تیتر سایت")
+        if not (article.site_lead or "").strip():
+            missing_fields.append("لید سایت")
+        if not (article.site_body or "").strip():
+            missing_fields.append("متن سایت")
+
+        if missing_fields:
+            await callback.answer(
+                "فیلدهای سایت ناقص است: " + "، ".join(missing_fields),
+                show_alert=True,
+            )
+            return
+
+        await callback.answer("انتشار در پس‌زمینه آغاز شد.")
+
+        preview_text = await sync_to_async(format_article_message)(article)
+        await update_review_message(
+            callback.bot,
+            callback.message,
+            preview_text,
+            reply_markup=article_review_keyboard(article_id, publishing=True),
+            suffix="⏳ <b>در حال انتشار روی سایت...</b>",
+        )
+
+        asyncio.create_task(
+            run_site_publish_job(
+                bot=callback.bot,
+                article_id=article_id,
+                operator_chat_id=callback.from_user.id,
+                review_chat_id=callback.message.chat.id,
+                review_message_id=callback.message.message_id,
+                review_is_photo=bool(callback.message.photo),
+            )
         )
 
     return router

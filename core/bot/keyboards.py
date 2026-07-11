@@ -51,11 +51,14 @@ BTN_APPROVE = "✅ تایید و ارسال"
 BTN_REJECT = "❌ رد کردن"
 BTN_EDIT = "✏️ ویرایش متن"
 BTN_ADD_LINK = "🔗 افزودن لینک"
+BTN_PUBLISH_SITE = "انتشار خبر در سایت"
+BTN_PUBLISH_SITE_IN_PROGRESS = "⏳ در حال انتشار..."
 
 ACTION_APPROVE = "approve"
 ACTION_REJECT = "reject"
 ACTION_EDIT = "edit"
 ACTION_ADD_LINK = "addlink"
+ACTION_PUBLISH_SITE = "publish_site"
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -82,8 +85,16 @@ def edit_force_reply() -> ForceReply:
     return ForceReply(force_reply=True, selective=True)
 
 
-def article_review_keyboard(article_id: int) -> InlineKeyboardMarkup:
+def article_review_keyboard(
+    article_id: int,
+    *,
+    publishing: bool = False,
+) -> InlineKeyboardMarkup:
     """Inline actions shown while reviewing a pending article."""
+    publish_button = InlineKeyboardButton(
+        text=BTN_PUBLISH_SITE_IN_PROGRESS if publishing else BTN_PUBLISH_SITE,
+        callback_data=f"{ACTION_PUBLISH_SITE}:{article_id}",
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -106,5 +117,6 @@ def article_review_keyboard(article_id: int) -> InlineKeyboardMarkup:
                     callback_data=f"{ACTION_ADD_LINK}:{article_id}",
                 ),
             ],
+            [publish_button],
         ]
     )
