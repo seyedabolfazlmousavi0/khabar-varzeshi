@@ -9,7 +9,6 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from asgiref.sync import sync_to_async
-from django.core.management import call_command
 
 from core.bot.auth import AdminFilter, is_admin_user
 from core.bot.config import BotConfig
@@ -125,39 +124,45 @@ async def _send_pending_batch(message: Message, config: BotConfig) -> None:
     print("[check_pending] _send_pending_batch: EXIT (all articles sent)", flush=True)
 
 
+async def _handle_check_pending(
+    message: Message,
+    state: FSMContext,
+    config: BotConfig,
+) -> None:
+    """Show pending articles for admin review — never runs ingestion."""
+    print("[check_pending] _handle_check_pending: ENTER", flush=True)
+    await state.clear()
+
+    if normalize_button_text(message.text) != normalize_button_text(CHECK_PENDING_BUTTON):
+        await message.answer(
+            "⌨️ منوی پایین به‌روزرسانی شد.",
+            reply_markup=main_menu(),
+        )
+
+    if not is_admin_user(message.from_user, config.allowed_admin_ids):
+        await message.answer(
+            "📌 فقط  ادمین ها دسترسی دارند به این دکمه",
+            reply_markup=main_menu(),
+        )
+        return
+
+    print("[check_pending] _handle_check_pending: before _send_pending_batch", flush=True)
+    await _send_pending_batch(message, config)
+    print("[check_pending] _handle_check_pending: EXIT", flush=True)
+
+
 def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
     print("[check_pending] build_router: ENTER", flush=True)
     router = Router(name="check_pending")
 
     @router.message(Command("check_pending"), admin_filter)
     async def cmd_check_pending(message: Message, state: FSMContext) -> None:
-        print("[check_pending] cmd_check_pending: ENTER", flush=True)
-        print("[check_pending] cmd_check_pending: before state.clear()", flush=True)
         await state.clear()
-        print("[check_pending] cmd_check_pending: after state.clear()", flush=True)
-        print("[check_pending] cmd_check_pending: before _send_pending_batch", flush=True)
         await _send_pending_batch(message, config)
-        print("[check_pending] cmd_check_pending: after _send_pending_batch — EXIT", flush=True)
 
     @router.message(CheckPendingButtonFilter())
     async def btn_check_pending(message: Message, state: FSMContext) -> None:
-        print("[check_pending] btn_check_pending: ENTER", flush=True)
-        await state.clear()
-
-        if normalize_button_text(message.text) != normalize_button_text(CHECK_PENDING_BUTTON):
-            await message.answer(
-                "⌨️ منوی پایین به‌روزرسانی شد.",
-                reply_markup=main_menu(),
-            )
-
-        if not is_admin_user(message.from_user, config.allowed_admin_ids):
-            await message.answer(
-                "📌 فقط  ادمین ها دسترسی دارند به این دکمه",
-                reply_markup=main_menu(),
-            )
-            return
-
-        await sync_to_async(call_command)("fetch_news")
+        await _handle_check_pending(message, state, config)
 
     print("[check_pending] build_router: EXIT (handlers registered)", flush=True)
     return router
