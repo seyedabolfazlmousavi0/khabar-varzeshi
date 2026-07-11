@@ -10,7 +10,8 @@ from asgiref.sync import sync_to_async
 
 from core.bot.auth import AdminFilter
 from core.bot.config import BotConfig
-from core.bot.keyboards import CHECK_PENDING_BUTTON, article_review_keyboard, main_menu
+from core.bot.keyboards import CHECK_PENDING_BUTTON, main_menu
+from core.bot.site_publish import review_keyboard_for_article
 from core.bot.services import load_article_for_bot, refresh_article_preview
 
 
@@ -49,6 +50,8 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         preview_chat_id = data.get("preview_chat_id")
         preview_message_id = data.get("preview_message_id")
 
+        preview_is_photo = data.get("preview_is_photo", False)
+
         await state.clear()
 
         if article_id and preview_chat_id and preview_message_id:
@@ -59,7 +62,8 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
                     chat_id=preview_chat_id,
                     message_id=preview_message_id,
                     article=article,
-                    reply_markup=article_review_keyboard(article.id),
+                    reply_markup=review_keyboard_for_article(article),
+                    is_photo=bool(preview_is_photo),
                 )
             except Exception:
                 pass

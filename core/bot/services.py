@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 PENDING_BATCH_SIZE = 20
 TELEGRAM_CAPTION_LIMIT = 1024
+TELEGRAM_MESSAGE_LIMIT = 4096
+_TRUNCATION_SUFFIX = "\n\n… (ادامهٔ متن حذف شد)"
 
 _ARTICLE_BOT_FIELDS = (
     "image_url",
@@ -105,15 +107,57 @@ def _format_telegram_preview(raw: str | None) -> str:
     return "\n\n".join(segments) if segments else "—"
 
 
-def format_article_message(article: NewsArticle) -> str:
+def _truncate_telegram_html(text: str, max_length: int) -> str:
+    if len(text) <= max_length:
+        return text
+    keep = max_length - len(_TRUNCATION_SUFFIX)
+    if keep <= 0:
+        return text[:max_length]
+    return text[:keep].rstrip() + _TRUNCATION_SUFFIX
+
+
+def format_article_message(
+    article: NewsArticle,
+    *,
+    max_length: int | None = TELEGRAM_MESSAGE_LIMIT,
+) -> str:
     title = html.escape(article.site_title or article.original_title or "—")
     lead = html.escape(article.site_lead or "—")
+    site_body = html.escape((article.site_body or "").strip() or "—")
     telegram_text = _format_telegram_preview(article.telegram_text)
-    return (
+
+    header = (
         f"📰 <b>تیتر:</b> {title}\n\n"
         f"📝 <b>لید:</b> {lead}\n\n"
+        f"📄 <b>متن سایت:</b>\n{site_body}\n\n"
         f"📱 <b>تلگرام:</b>\n{telegram_text}"
     )
+
+    if max_length is None:
+        return header
+
+    if len(header) <= max_length:
+        return header
+
+    # Preserve title/lead/telegram; shrink the site-body block to fit.
+    prefix = (
+        f"📰 <b>تیتر:</b> {title}\n\n"
+        f"📝 <b>لید:</b> {lead}\n\n"
+        f"📄 <b>متن سایت:</b>\n"
+    )
+    suffix = f"\n\n📱 <b>تلگرام:</b>\n{telegram_text}"
+    body_budget = max_length - len(prefix) - len(suffix) - len(_TRUNCATION_SUFFIX)
+    if body_budget > 0:
+        trimmed_body = site_body[:body_budget].rstrip() + _TRUNCATION_SUFFIX
+        return prefix + trimmed_body + suffix
+
+    return _truncate_telegram_html(header, max_length)
+
+
+def format_review_message(article: NewsArticle, *, is_photo: bool = False) -> str:
+    """Format an operator preview respecting Telegram caption limits."""
+    limit = TELEGRAM_CAPTION_LIMIT if is_photo else TELEGRAM_MESSAGE_LIMIT
+    return format_article_message(article, max_length=limit)
 
 
 def is_valid_http_url(url: str) -> bool:
@@ -218,9 +262,10 @@ async def refresh_article_preview(
     message_id: int,
     article: NewsArticle,
     reply_markup: InlineKeyboardMarkup | None,
+    is_photo: bool = False,
 ) -> None:
     """Refresh a pending-article preview by chat/message id."""
-    preview_text = format_article_message(article)
+    preview_text = format_review_message(article, is_photo=is_photo)
     try:
         await bot.edit_message_text(
             text=preview_text,

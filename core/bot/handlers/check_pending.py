@@ -15,12 +15,12 @@ from core.bot.config import BotConfig
 from core.bot.keyboards import (
     CHECK_PENDING_BUTTON,
     CheckPendingButtonFilter,
-    article_review_keyboard,
     main_menu,
     normalize_button_text,
 )
+from core.bot.site_publish import review_keyboard_for_article
 from core.bot.services import (
-    format_article_message,
+    format_review_message,
     load_pending_articles,
     resolve_image_url,
     send_with_optional_image,
@@ -82,9 +82,12 @@ async def _send_pending_batch(message: Message, config: BotConfig) -> None:
             f"article_id={article.id}",
             flush=True,
         )
-        preview_text = await sync_to_async(format_article_message)(article)
+        preview_text = await sync_to_async(format_review_message)(
+            article,
+            is_photo=bool(image_url),
+        )
         print(
-            f"[check_pending] _send_pending_batch: after format_article_message "
+            f"[check_pending] _send_pending_batch: after format_review_message "
             f"article_id={article.id} text_len={len(preview_text)}",
             flush=True,
         )
@@ -100,7 +103,7 @@ async def _send_pending_batch(message: Message, config: BotConfig) -> None:
                 message.chat.id,
                 preview_text,
                 image_url,
-                reply_markup=article_review_keyboard(article.id),
+                reply_markup=review_keyboard_for_article(article),
             )
             print(
                 f"[check_pending] _send_pending_batch: after send_with_optional_image "

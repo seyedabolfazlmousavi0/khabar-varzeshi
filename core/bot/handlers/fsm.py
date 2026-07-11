@@ -11,7 +11,8 @@ from asgiref.sync import sync_to_async
 
 from core.bot.auth import AdminFilter
 from core.bot.config import BotConfig
-from core.bot.keyboards import CHECK_PENDING_BUTTON, admin_main_menu, article_review_keyboard
+from core.bot.keyboards import CHECK_PENDING_BUTTON, admin_main_menu
+from core.bot.site_publish import review_keyboard_for_article
 from core.bot.services import (
     is_valid_http_url,
     load_article_for_bot,
@@ -32,6 +33,7 @@ async def _update_preview_after_change(
     data = await state.get_data()
     preview_chat_id = data.get("preview_chat_id")
     preview_message_id = data.get("preview_message_id")
+    preview_is_photo = data.get("preview_is_photo", False)
     if not preview_chat_id or not preview_message_id:
         return
 
@@ -40,7 +42,8 @@ async def _update_preview_after_change(
         chat_id=preview_chat_id,
         message_id=preview_message_id,
         article=article,
-        reply_markup=article_review_keyboard(article.id),
+        reply_markup=review_keyboard_for_article(article),
+        is_photo=bool(preview_is_photo),
     )
 
 

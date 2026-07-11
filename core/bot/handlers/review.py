@@ -18,18 +18,22 @@ from core.bot.keyboards import (
     ACTION_EDIT,
     ACTION_PUBLISH_SITE,
     ACTION_REJECT,
-    article_review_keyboard,
     edit_force_reply,
 )
 from core.bot.services import (
     finalize_review_message,
-    format_article_message,
+    format_review_message,
     load_article_for_bot,
     resolve_image_url,
     send_with_optional_image,
     update_review_message,
 )
-from core.bot.site_publish import is_site_publish_in_progress, run_site_publish_job
+from core.bot.site_publish import (
+    is_site_publish_in_progress,
+    is_site_published,
+    review_keyboard_for_article,
+    run_site_publish_job,
+)
 from core.bot.states import AddLinkStates, EditNewsStates
 from core.bot.text_compose import (
     SITE_LINK_ANCHOR,
@@ -50,6 +54,10 @@ def _parse_article_id(callback_data: str | None) -> int | None:
         return int(raw_id)
     except ValueError:
         return None
+
+
+def _review_keyboard(article: NewsArticle, *, publishing: bool = False):
+    return review_keyboard_for_article(article, publishing=publishing)
 
 
 def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
@@ -79,8 +87,12 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             )
             return
 
-        if article.status != NewsArticle.Status.PENDING:
-            await callback.answer("این خبر دیگر در انتظار تایید نیست.")
+        if article.status == NewsArticle.Status.PUBLISHED:
+            await callback.answer("این خبر قبلاً به کانال ارسال شده است.", show_alert=True)
+            return
+
+        if article.status == NewsArticle.Status.REJECTED:
+            await callback.answer("این خبر رد شده است.")
             return
 
         publish_text = normalize_telegram_text(article.telegram_text)
@@ -105,9 +117,15 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         article.status = NewsArticle.Status.PUBLISHED
         await sync_to_async(article.save)(update_fields=["status"])
         await callback.answer("✅ منتشر شد.")
-        await finalize_review_message(
+        preview_text = await sync_to_async(format_review_message)(
+            article,
+            is_photo=bool(callback.message.photo),
+        )
+        await update_review_message(
             callback.bot,
             callback.message,
+            preview_text,
+            reply_markup=_review_keyboard(article),
             suffix="✅ <b>تایید و ارسال شد.</b>",
         )
 
@@ -167,7 +185,10 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         parsed = parse_telegram_text(article.telegram_text)
         editable_body = get_editable_body(article.telegram_text)
-        preview_text = await sync_to_async(format_article_message)(article)
+        preview_text = await sync_to_async(format_review_message)(
+            article,
+            is_photo=bool(callback.message.photo),
+        )
 
         await update_review_message(
             callback.bot,
@@ -235,6 +256,7 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             article_id=article_id,
             preview_chat_id=callback.message.chat.id,
             preview_message_id=callback.message.message_id,
+            preview_is_photo=bool(callback.message.photo),
             footer=parsed.footer,
         )
         await callback.answer()
@@ -273,8 +295,12 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             )
             return
 
-        if article.status != NewsArticle.Status.PENDING:
-            await callback.answer("این خبر دیگر در انتظار تایید نیست.")
+        if is_site_published(article_id):
+            await callback.answer("این خبر قبلاً روی سایت منتشر شده است.", show_alert=True)
+            return
+
+        if article.status == NewsArticle.Status.REJECTED:
+            await callback.answer("این خبر رد شده است.")
             return
 
         missing_fields: list[str] = []
@@ -294,12 +320,15 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         await callback.answer("انتشار در پس‌زمینه آغاز شد.")
 
-        preview_text = await sync_to_async(format_article_message)(article)
+        preview_text = await sync_to_async(format_review_message)(
+            article,
+            is_photo=bool(callback.message.photo),
+        )
         await update_review_message(
             callback.bot,
             callback.message,
             preview_text,
-            reply_markup=article_review_keyboard(article_id, publishing=True),
+            reply_markup=_review_keyboard(article, publishing=True),
             suffix="⏳ <b>در حال انتشار روی سایت...</b>",
         )
 
@@ -307,7 +336,6 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             run_site_publish_job(
                 bot=callback.bot,
                 article_id=article_id,
-                operator_chat_id=callback.from_user.id,
                 review_chat_id=callback.message.chat.id,
                 review_message_id=callback.message.message_id,
                 review_is_photo=bool(callback.message.photo),

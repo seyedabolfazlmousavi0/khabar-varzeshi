@@ -48,11 +48,13 @@ class CheckPendingButtonFilter(BaseFilter):
 
 
 BTN_APPROVE = "✅ تایید و ارسال"
+BTN_APPROVE_DONE = "✅ ارسال شد به کانال"
 BTN_REJECT = "❌ رد کردن"
 BTN_EDIT = "✏️ ویرایش متن"
 BTN_ADD_LINK = "🔗 افزودن لینک"
 BTN_PUBLISH_SITE = "انتشار خبر در سایت"
 BTN_PUBLISH_SITE_IN_PROGRESS = "⏳ در حال انتشار..."
+BTN_PUBLISH_SITE_DONE = "✅ منتشر شد در سایت"
 
 ACTION_APPROVE = "approve"
 ACTION_REJECT = "reject"
@@ -89,17 +91,31 @@ def article_review_keyboard(
     article_id: int,
     *,
     publishing: bool = False,
+    channel_published: bool = False,
+    site_published: bool = False,
 ) -> InlineKeyboardMarkup:
     """Inline actions shown while reviewing a pending article."""
+    if channel_published:
+        approve_text = BTN_APPROVE_DONE
+    else:
+        approve_text = BTN_APPROVE
+
+    if site_published:
+        publish_text = BTN_PUBLISH_SITE_DONE
+    elif publishing:
+        publish_text = BTN_PUBLISH_SITE_IN_PROGRESS
+    else:
+        publish_text = BTN_PUBLISH_SITE
+
     publish_button = InlineKeyboardButton(
-        text=BTN_PUBLISH_SITE_IN_PROGRESS if publishing else BTN_PUBLISH_SITE,
+        text=publish_text,
         callback_data=f"{ACTION_PUBLISH_SITE}:{article_id}",
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=BTN_APPROVE,
+                    text=approve_text,
                     callback_data=f"{ACTION_APPROVE}:{article_id}",
                 ),
                 InlineKeyboardButton(

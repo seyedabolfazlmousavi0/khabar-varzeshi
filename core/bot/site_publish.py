@@ -11,23 +11,30 @@ from asgiref.sync import sync_to_async
 from django.db import close_old_connections
 
 from core.bot.keyboards import article_review_keyboard
-from core.bot.services import format_article_message, load_article_for_bot, update_review_message
+from core.bot.services import format_review_message, load_article_for_bot, update_review_message
+from core.models import NewsArticle
 from core.newsroom.exceptions import SitePublishError
 from core.newsroom.publisher import publish_article_by_id
 
 logger = logging.getLogger(__name__)
 
 _in_progress: set[int] = set()
-_in_progress_lock = Lock()
+_site_published: set[int] = set()
+_state_lock = Lock()
 
 
 def is_site_publish_in_progress(article_id: int) -> bool:
-    with _in_progress_lock:
+    with _state_lock:
         return article_id in _in_progress
 
 
+def is_site_published(article_id: int) -> bool:
+    with _state_lock:
+        return article_id in _site_published
+
+
 def _mark_in_progress(article_id: int) -> bool:
-    with _in_progress_lock:
+    with _state_lock:
         if article_id in _in_progress:
             return False
         _in_progress.add(article_id)
@@ -35,8 +42,13 @@ def _mark_in_progress(article_id: int) -> bool:
 
 
 def _unmark_in_progress(article_id: int) -> None:
-    with _in_progress_lock:
+    with _state_lock:
         _in_progress.discard(article_id)
+
+
+def _mark_site_published(article_id: int) -> None:
+    with _state_lock:
+        _site_published.add(article_id)
 
 
 def _publish_sync(article_id: int) -> None:
@@ -44,11 +56,24 @@ def _publish_sync(article_id: int) -> None:
     publish_article_by_id(article_id)
 
 
+def review_keyboard_for_article(
+    article: NewsArticle,
+    *,
+    publishing: bool = False,
+):
+    """Build the review inline keyboard reflecting current publish state."""
+    return article_review_keyboard(
+        article.id,
+        publishing=publishing,
+        channel_published=article.status == NewsArticle.Status.PUBLISHED,
+        site_published=is_site_published(article.id),
+    )
+
+
 async def run_site_publish_job(
     *,
     bot: Bot,
     article_id: int,
-    operator_chat_id: int,
     review_chat_id: int,
     review_message_id: int,
     review_is_photo: bool = False,
@@ -70,10 +95,6 @@ async def run_site_publish_job(
                 article_id,
                 exc,
             )
-            await bot.send_message(
-                operator_chat_id,
-                "❌ خطا در انتشار خودکار روی سایت. لطفاً لاگ‌ها را بررسی کنید",
-            )
             await _refresh_review_after_publish(
                 bot,
                 article_id=article_id,
@@ -88,10 +109,6 @@ async def run_site_publish_job(
                 "Unexpected site publish failure for article #%s",
                 article_id,
             )
-            await bot.send_message(
-                operator_chat_id,
-                "❌ خطا در انتشار خودکار روی سایت. لطفاً لاگ‌ها را بررسی کنید",
-            )
             await _refresh_review_after_publish(
                 bot,
                 article_id=article_id,
@@ -102,10 +119,7 @@ async def run_site_publish_job(
             )
             return
 
-        await bot.send_message(
-            operator_chat_id,
-            "✅ خبر با موفقیت روی سایت منتشر شد",
-        )
+        _mark_site_published(article_id)
         await _refresh_review_after_publish(
             bot,
             article_id=article_id,
@@ -136,7 +150,10 @@ async def _refresh_review_after_publish(
         )
         return
 
-    preview_text = await sync_to_async(format_article_message)(article)
+    preview_text = await sync_to_async(format_review_message)(
+        article,
+        is_photo=review_is_photo,
+    )
 
     class _ReviewMessageProxy:
         def __init__(self, chat_id: int, message_id: int, is_photo: bool) -> None:
@@ -148,6 +165,6 @@ async def _refresh_review_after_publish(
         bot,
         _ReviewMessageProxy(review_chat_id, review_message_id, review_is_photo),
         preview_text,
-        reply_markup=article_review_keyboard(article_id),
+        reply_markup=review_keyboard_for_article(article),
         suffix=suffix,
     )
