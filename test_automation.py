@@ -10,7 +10,6 @@ Install:
 Run:
     python test_automation.py
 
-Each step pauses with ``input()`` so you can inspect the browser manually.
 Edit the SELECTORS block below if element IDs change on the site.
 """
 
@@ -26,6 +25,7 @@ from pathlib import Path
 from selenium import webdriver
 from selenium.common.exceptions import (
     NoSuchWindowException,
+    StaleElementReferenceException,
     TimeoutException,
     WebDriverException,
 )
@@ -68,19 +68,22 @@ CKEDITOR_BODY_INSTANCE_ID = "newsForm:newsTab:body"
 
 # Pause between micro-actions inside a step (helps PrimeFaces AJAX settle).
 MICRO_DELAY = float(os.getenv("SELENIUM_MICRO_DELAY", "0.5"))
-SAMPLE_HEADLINE = "تیتر آزمایشی — تست اتوماسیون"
-SAMPLE_LEAD = "این یک لید کوتاه برای تست اسکریپت سلنیوم است."
+SAMPLE_HEADLINE = "جام جهانی ۲۰۲۶؛ بازیکنان باشگاه‌های لیگ برتر چند گل به ثمر رسانده‌اند؟"
+SAMPLE_LEAD = "رقابت داغ ستارگان فوتبال جهان در جام جهانی ۲۰۲۶، جدول گلزنی باشگاه‌ها را با شگفتی‌های غیرمنتظره‌ای روبه‌رو کرده است؛ آمارها از پیشتازی مدعیان اسپانیایی و فرانسوی و عملکرد غافلگیرکننده برخی تیم‌های انگلیسی حکایت دارند."
 SAMPLE_BODY = (
-    "<h2>زیرعنوان اول</h2>"
-    "<p>متن بدنه خبر برای تست CKEditor.</p>"
-    "<h2>زیرعنوان دوم</h2>"
-    "<p>پاراگراف دوم.</p>"
+"<h2>تحلیل آمارهای شگفت‌انگیز جام جهانی ۲۰۲۶؛ رقابت داغ غول‌های اروپایی</h2>"
+
+"<p>بررسی جدیدترین آمارهای منتشر شده از <strong>جام جهانی ۲۰۲۶</strong> نشان می‌دهد که رقابت میان باشگاه‌های بزرگ اروپایی برای تصاحب عنوان گلزن‌ترین تیم تورنمنت به اوج خود رسیده است. در حال حاضر، باشگاه <strong>رئال مادرید</strong> با درخشش ستارگان ملی‌پوش خود موفق شده است با مجموع ۱۱ گل تیمی، صدر جدول گلزنان را به خود اختصاص دهد؛ در این میان کیلیان امباپه و وینیسیوس جونیور هر کدام با ثبت ۴ گل، بیشترین سهم را در موفقیت <strong>مادریدی‌ها</strong> داشته‌اند و مابقی گل‌ها توسط دیگر بازیکنان این تیم به ثمر رسیده است. پاریسن‌ژرمن نیز با تکیه بر گلزنی ۴ گله عثمان دمبله و مجموع ۱۰ گل تیمی، سایه به سایه آن‌ها در رتبه دوم حرکت می‌کند.</p>"
+
+"<p>اما نکته شگفت‌انگیز این دوره، عملکرد غیرمنتظره بازیکنان برخی تیم‌های <strong>لیگ برتر انگلیس</strong> است. در شرایطی که انتظار می‌رفت باشگاه‌های قدرتمندی مثل <strong>منچسترسیتی</strong> با ارلینگ هالند ۴ گله در رتبه‌های بالاتر قرار گیرند، سه تیم آرسنال، کریستال‌پالاس و ساندرلند هر کدام به طور مجزا آمار خیره‌کننده <strong>۷ گل زده</strong> را بر جای گذاشته‌اند. در این میان درخشش اسماعیلا سار از کریستال‌پالاس با ثبت ۳ گل، نقش مهمی در این شگفتی‌سازی داشته است.</p>"
+
+"<p>در بخش بازی‌سازی و ارسال پاس گل نیز، <strong>باشگاه لیورپول</strong> با وجود حضور در رده‌های پایین‌تر جدول گلزنان، با ثبت یک رکورد بی‌نظیر و ارسال ۱۲ پاس گل، خود را از سایر رقبا جدا کرده است. با وجود اینکه برخی از مهره‌های کلیدی این تیم مانند کودی خاکپو با حذف تیم‌های ملی خود از گردونه مسابقات کنار رفته‌اند، اما تأثیرگذاری چشمگیر بازیکنانی همچون <strong>محمد صلاح</strong> و الکساندر ایساک باعث شده تا لک‌لک‌های آنفیلد همچنان عنوان خلاق‌ترین باشگاه این تورنمنت بزرگ را یدک بکشند.</p>"
 )
 SAMPLE_IMAGE_PATH = os.getenv(
     "NEWSROOM_TEST_IMAGE",
     str(Path(__file__).resolve().parent / "test_image.jpg"),
 )
-SAMPLE_IMAGE_CAPTION = "عنوان آزمایشی"
+SAMPLE_IMAGE_CAPTION = "جام جهانی ۲۰۲۶؛ بازیکنان باشگاه‌های لیگ برتر چند گل به ثمر رسانده‌اند؟"
 
 
 class SELECTORS:
@@ -246,8 +249,8 @@ def tracked_step(
 
 
 def pause_step(step_name: str) -> None:
-    """Wait for manual verification between major steps."""
-    input(f"\n>>> [{step_name}] Press Enter to continue...\n")
+    """No-op — steps run continuously without manual confirmation."""
+    return
 
 
 def micro_pause() -> None:
@@ -604,6 +607,31 @@ def fill_content(
             )
 
 
+def click_media_grid_first_thumbnail(driver: webdriver.Chrome) -> None:
+    """Click the first media tile; re-find on each attempt (PrimeFaces AJAX refresh)."""
+    locator = SELECTORS.MEDIA_GRID_FIRST_THUMBNAIL
+    progress.interact("click", locator)
+
+    def _click_thumbnail(drv: webdriver.Chrome) -> bool:
+        try:
+            element = drv.find_element(*locator)
+            if not element.is_displayed():
+                return False
+            drv.execute_script(
+                """
+                var el = arguments[0];
+                el.scrollIntoView({block: 'center'});
+                el.click();
+                """,
+                element,
+            )
+            return True
+        except StaleElementReferenceException:
+            return False
+
+    wait_for(driver, WAIT_TIMEOUT).until(_click_thumbnail)
+
+
 def _reveal_file_input(driver: webdriver.Chrome, file_input) -> None:
     """Make a hidden PrimeFaces file input interactable for send_keys."""
     driver.execute_script(
@@ -708,7 +736,7 @@ def upload_image(
         file_input.send_keys(image_path)
         micro_pause()
 
-        upload_title = caption or "عنوان آزمایشی"
+        upload_title = caption or "کدام باشگاه‌ها بیشترین گل را در جام جهانی ۲۰۲۶ به ثمر رسانده‌اند؟"
         type_when_ready(
             driver,
             SELECTORS.IMAGE_UPLOAD_TITLE,
@@ -721,10 +749,10 @@ def upload_image(
         except TimeoutException:
             click_when_ready(driver, SELECTORS.XPATH_IMAGE_UPLOAD_BTN)
 
-        progress.note("waiting 3s for server to process upload")
-        time.sleep(3)
+        progress.note("waiting 10s for server to process upload")
+        time.sleep(10)
 
-        click_when_ready(driver, SELECTORS.MEDIA_GRID_FIRST_THUMBNAIL)
+        click_media_grid_first_thumbnail(driver)
         _switch_to_main_after_popup_close(driver, main_window)
 
         def _upload_verified_on_main(d: webdriver.Chrome) -> bool:
@@ -782,10 +810,6 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[STOP] Interrupted by user.", flush=True)
         if driver is not None:
-            input(
-                "\n>>> Interrupted — browser left open. "
-                "Press Enter to close it (or close the window manually)...\n"
-            )
             try:
                 driver.quit()
             except WebDriverException:
@@ -793,24 +817,10 @@ def main() -> int:
         return 130
 
     except StepFailure:
-        if driver is not None:
-            input(
-                "\n>>> Step failed — browser left open for inspection. "
-                "Press Enter to exit...\n"
-            )
-        else:
-            input("\n>>> Step failed before browser started. Press Enter to exit...\n")
         return 1
 
     except Exception as exc:
         progress.fail("Unexpected Error", driver, exc)
-        if driver is not None:
-            input(
-                "\n>>> Unexpected error — browser left open for inspection. "
-                "Press Enter to exit...\n"
-            )
-        else:
-            input("\n>>> Unexpected error. Press Enter to exit...\n")
         return 1
 
 
