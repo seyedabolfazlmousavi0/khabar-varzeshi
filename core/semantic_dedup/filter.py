@@ -166,6 +166,13 @@ def build_semantic_dedup_filter(
         client,
         model=cfg.embedding_model,
         output_dimensionality=cfg.output_dimensionality,
+        request_interval_seconds=cfg.request_interval_seconds,
+        batch_size=cfg.batch_size,
+        batch_pause_seconds=cfg.batch_pause_seconds,
+        max_retries=cfg.max_retries,
+        retry_base_delay_seconds=cfg.retry_base_delay_seconds,
+        retry_max_delay_seconds=cfg.retry_max_delay_seconds,
+        log=_log,
     )
 
     try:

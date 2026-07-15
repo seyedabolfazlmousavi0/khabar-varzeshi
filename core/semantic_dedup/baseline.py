@@ -77,6 +77,12 @@ def _entry_description(entry: Any) -> str:
     return ""
 
 
+def _embedding_is_usable(raw: Any) -> bool:
+    return isinstance(raw, list) and len(raw) > 0 and all(
+        isinstance(v, (int, float)) for v in raw
+    )
+
+
 class BaselineCorpus:
     """In-memory view of the last-N-hours Khabar Varzeshi articles with embeddings."""
 
@@ -106,7 +112,11 @@ def load_baseline_corpus(
     embedding_service: "EmbeddingService",
     log: Callable[[str], None] | None = None,
 ) -> BaselineCorpus:
-    """Parse the baseline RSS, keep 24h items, and ensure embeddings are cached."""
+    """Parse the baseline RSS, keep 24h items, and ensure embeddings are cached.
+
+    Cached rows are reused without any Gemini API call. Only missing items are
+    embedded, in paced batches, to stay under the free-tier RPM quota.
+    """
 
     def _log(message: str) -> None:
         if log:
@@ -167,28 +177,51 @@ def load_baseline_corpus(
     if not fresh_entries:
         return BaselineCorpus([])
 
+    guids = [item["guid"] for item in fresh_entries]
     existing = {
         row.guid: row
         for row in BaselineArticleEmbedding.objects.filter(
-            guid__in=[item["guid"] for item in fresh_entries],
+            guid__in=guids,
             embedding_model=embedding_service.model,
+            pub_date__gte=cutoff,
         )
     }
 
-    items: list[BaselineItem] = []
-    created = 0
-    reused = 0
+    cached_by_guid: dict[str, list[float]] = {}
+    pending: list[dict[str, Any]] = []
 
     for entry in fresh_entries:
         row = existing.get(entry["guid"])
-        if row is not None and row.embedding:
-            embedding = l2_normalize([float(v) for v in row.embedding])
-            reused += 1
-        else:
-            embedding = embedding_service.embed_text(
-                entry["document"],
-                task_type="SEMANTIC_SIMILARITY",
+        if row is not None and _embedding_is_usable(row.embedding):
+            cached_by_guid[entry["guid"]] = l2_normalize(
+                [float(v) for v in row.embedding]
             )
+        else:
+            pending.append(entry)
+
+    _log(
+        f"baseline cache | hit={len(cached_by_guid)} | miss={len(pending)} "
+        f"| will call Gemini only for misses"
+    )
+
+    if pending:
+        _log(
+            f"embedding {len(pending)} baseline article(s) "
+            f"(batch_size={embedding_service.batch_size}, "
+            f"interval={embedding_service.request_interval_seconds:.1f}s)"
+        )
+        documents = [entry["document"] for entry in pending]
+        vectors = embedding_service.embed_many(
+            documents,
+            task_type="SEMANTIC_SIMILARITY",
+        )
+        if len(vectors) != len(pending):
+            raise RuntimeError(
+                f"Embedding count mismatch: got {len(vectors)}, "
+                f"expected {len(pending)}"
+            )
+
+        for entry, embedding in zip(pending, vectors):
             BaselineArticleEmbedding.objects.update_or_create(
                 guid=entry["guid"],
                 defaults={
@@ -200,8 +233,14 @@ def load_baseline_corpus(
                     "embedding": embedding,
                 },
             )
-            created += 1
+            cached_by_guid[entry["guid"]] = embedding
 
+    items: list[BaselineItem] = []
+    for entry in fresh_entries:
+        embedding = cached_by_guid.get(entry["guid"])
+        if embedding is None:
+            _log(f"skip baseline item without embedding: {entry['title'][:80]!r}")
+            continue
         items.append(
             BaselineItem(
                 guid=entry["guid"],
@@ -215,6 +254,6 @@ def load_baseline_corpus(
 
     _log(
         f"baseline embeddings ready | total={len(items)} "
-        f"| new={created} | cached={reused}"
+        f"| new={len(pending)} | cached={len(cached_by_guid) - len(pending)}"
     )
     return BaselineCorpus(items)
