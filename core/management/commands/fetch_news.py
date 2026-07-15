@@ -53,6 +53,7 @@ from requests.exceptions import Timeout as RequestsTimeout
 
 from core.article_scraper import _clean_html_to_text, scrape_article_html
 from core.models import NewsArticle, RssSource
+from core.semantic_dedup import SemanticDedupFilter, build_semantic_dedup_filter
 from core.url_utils import normalize_article_url
 
 
@@ -256,12 +257,25 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"Using Gemini model: {model_name}")
 
+        def _dedup_log(message: str) -> None:
+            self.stdout.write(self.style.HTTP_INFO(f"  [semantic-dedup] {message}"))
+
+        semantic_filter = build_semantic_dedup_filter(
+            client,
+            log=_dedup_log,
+        )
+
         sources = RssSource.objects.filter(is_active=True)
         if not sources.exists():
             self.stdout.write(self.style.WARNING("No active RSS sources found."))
             return
 
-        totals = {"created": 0, "skipped": 0, "errors": 0}
+        totals = {
+            "created": 0,
+            "skipped": 0,
+            "semantic_skipped": 0,
+            "errors": 0,
+        }
 
         for source in sources:
             self.stdout.write(
@@ -288,7 +302,12 @@ class Command(BaseCommand):
 
             for entry in feed.entries:
                 stats = self._process_entry(
-                    entry, source, client, model_name, generation_config,
+                    entry,
+                    source,
+                    client,
+                    model_name,
+                    generation_config,
+                    semantic_filter,
                 )
                 for key, value in stats.items():
                     totals[key] += value
@@ -297,7 +316,8 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 "\nDone. "
                 f"Created: {totals['created']}, "
-                f"skipped (duplicate): {totals['skipped']}, "
+                f"skipped (URL duplicate): {totals['skipped']}, "
+                f"skipped (semantic): {totals['semantic_skipped']}, "
                 f"errors: {totals['errors']}."
             )
         )
@@ -316,8 +336,9 @@ class Command(BaseCommand):
         client: "genai.Client",
         model_name: str,
         generation_config: "types.GenerateContentConfig",
+        semantic_filter: SemanticDedupFilter,
     ) -> dict[str, int]:
-        stats = {"created": 0, "skipped": 0, "errors": 0}
+        stats = {"created": 0, "skipped": 0, "semantic_skipped": 0, "errors": 0}
 
         link = (getattr(entry, "link", "") or "").strip()
         title = (getattr(entry, "title", "") or "").strip()
@@ -344,6 +365,30 @@ class Command(BaseCommand):
             )
             stats["skipped"] += 1
             return stats
+
+        # Semantic dedup runs BEFORE scrape/Gemini so we avoid expensive work
+        # on stories already covered by Khabar Varzeshi in the last 24 hours.
+        match = semantic_filter.check_entry(entry)
+        if match.skipped_due_to_error:
+            self.stderr.write(self.style.WARNING(
+                f"  ! semantic dedup unavailable for '{title[:60]}' "
+                f"— continuing ({match.detail})"
+            ))
+        elif match.is_duplicate:
+            self.stdout.write(self.style.WARNING(
+                f"  - semantic duplicate, skipped: {title[:80]} "
+                f"| score={match.similarity:.3f} "
+                f"| matched={match.matched_title[:80]!r}"
+            ))
+            if match.matched_url:
+                self.stdout.write(f"      baseline url: {match.matched_url}")
+            stats["semantic_skipped"] += 1
+            return stats
+        else:
+            self.stdout.write(self.style.HTTP_INFO(
+                f"  → semantic ok | score={match.similarity:.3f} "
+                f"| {match.detail}"
+            ))
 
         raw_html, content_source, scrape_detail = scrape_article_html(
             link, canonical_url, entry, scrape_log=self._scrape_log,

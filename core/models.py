@@ -55,3 +55,27 @@ class NewsArticle(models.Model):
         if self.original_url:
             self.original_url = normalize_article_url(self.original_url)
         super().save(*args, **kwargs)
+
+
+class BaselineArticleEmbedding(models.Model):
+    """Cached embedding for a Khabar Varzeshi RSS item from the last 24 hours."""
+
+    guid = models.CharField(max_length=500, unique=True, db_index=True)
+    url = models.URLField(max_length=500)
+    title = models.CharField(max_length=500)
+    description = models.TextField(blank=True)
+    pub_date = models.DateTimeField(db_index=True)
+    embedding_model = models.CharField(max_length=100)
+    embedding = models.JSONField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Baseline Article Embedding"
+        verbose_name_plural = "Baseline Article Embeddings"
+        ordering = ["-pub_date"]
+        indexes = [
+            models.Index(fields=["pub_date", "embedding_model"]),
+        ]
+
+    def __str__(self) -> str:
+        return self.title[:80]
