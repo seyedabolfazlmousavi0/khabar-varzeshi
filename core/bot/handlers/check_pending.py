@@ -18,6 +18,7 @@ from core.bot.keyboards import (
     main_menu,
     normalize_button_text,
 )
+from core.bot.review_panels import register_review_panel
 from core.bot.site_publish import review_keyboard_for_article
 from core.bot.services import (
     format_review_message,
@@ -98,13 +99,20 @@ async def _send_pending_batch(message: Message, config: BotConfig) -> None:
                 f"article_id={article.id}",
                 flush=True,
             )
-            await send_with_optional_image(
+            sent = await send_with_optional_image(
                 message.bot,
                 message.chat.id,
                 preview_text,
                 image_url,
                 reply_markup=review_keyboard_for_article(article),
             )
+            if sent is not None:
+                register_review_panel(
+                    article.id,
+                    sent.chat.id,
+                    sent.message_id,
+                    is_photo=bool(sent.photo),
+                )
             print(
                 f"[check_pending] _send_pending_batch: after send_with_optional_image "
                 f"article_id={article.id}",

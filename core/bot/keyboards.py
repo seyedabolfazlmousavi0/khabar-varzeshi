@@ -55,12 +55,14 @@ BTN_ADD_LINK = "🔗 افزودن لینک"
 BTN_PUBLISH_SITE = "انتشار خبر در سایت"
 BTN_PUBLISH_SITE_IN_PROGRESS = "⏳ در حال انتشار..."
 BTN_PUBLISH_SITE_DONE = "✅ منتشر شد در سایت"
+BTN_VIEW_FULL_SITE = "دیدن نسخه کامل سایت:"
 
 ACTION_APPROVE = "approve"
 ACTION_REJECT = "reject"
 ACTION_EDIT = "edit"
 ACTION_ADD_LINK = "addlink"
 ACTION_PUBLISH_SITE = "publish_site"
+ACTION_VIEW_FULL_SITE = "view_site"
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -111,6 +113,10 @@ def article_review_keyboard(
         text=publish_text,
         callback_data=f"{ACTION_PUBLISH_SITE}:{article_id}",
     )
+    view_full_site_button = InlineKeyboardButton(
+        text=BTN_VIEW_FULL_SITE,
+        callback_data=f"{ACTION_VIEW_FULL_SITE}:{article_id}",
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -134,5 +140,6 @@ def article_review_keyboard(
                 ),
             ],
             [publish_button],
+            [view_full_site_button],
         ]
     )

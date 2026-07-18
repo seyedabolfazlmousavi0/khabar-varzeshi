@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -21,6 +22,7 @@ PENDING_BATCH_SIZE = 20
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_MESSAGE_LIMIT = 4096
 _TRUNCATION_SUFFIX = "\n\n… (ادامهٔ متن حذف شد)"
+_TAG_RE = re.compile(r"<[^>]+>")
 
 _ARTICLE_BOT_FIELDS = (
     "image_url",
@@ -158,6 +160,74 @@ def format_review_message(article: NewsArticle, *, is_photo: bool = False) -> st
     """Format an operator preview respecting Telegram caption limits."""
     limit = TELEGRAM_CAPTION_LIMIT if is_photo else TELEGRAM_MESSAGE_LIMIT
     return format_article_message(article, max_length=limit)
+
+
+def _site_body_as_plain_text(raw_html: str | None) -> str:
+    """Convert site HTML body to readable plain text for the full-site view."""
+    text = (raw_html or "").strip()
+    if not text:
+        return "—"
+    # Preserve paragraph/heading breaks before stripping tags.
+    text = re.sub(r"(?i)</p\s*>", "\n\n", text)
+    text = re.sub(r"(?i)</h[1-6]\s*>", "\n\n", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = _TAG_RE.sub("", text)
+    text = html.unescape(text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() or "—"
+
+
+def format_full_site_version(article: NewsArticle) -> str:
+    """Full site title/lead/body for the 'view full site' button (no length trim)."""
+    title = html.escape(article.site_title or article.original_title or "—")
+    lead = html.escape(article.site_lead or "—")
+    body = html.escape(_site_body_as_plain_text(article.site_body))
+    return (
+        f"📄 <b>نسخه کامل سایت — خبر #{article.id}</b>\n\n"
+        f"📰 <b>تیتر:</b>\n{title}\n\n"
+        f"📝 <b>لید:</b>\n{lead}\n\n"
+        f"📄 <b>متن:</b>\n{body}"
+    )
+
+
+def split_telegram_chunks(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """Split long text into Telegram-safe message chunks."""
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        cut = remaining.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    return chunks
+
+
+async def send_full_site_version(
+    bot: Bot,
+    chat_id: Any,
+    article: NewsArticle,
+    *,
+    reply_to_message_id: int | None = None,
+) -> None:
+    """Send the complete site version, splitting across messages if needed."""
+    full_text = format_full_site_version(article)
+    for index, chunk in enumerate(split_telegram_chunks(full_text)):
+        kwargs: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if index == 0 and reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        await bot.send_message(**kwargs)
 
 
 def is_valid_http_url(url: str) -> bool:

@@ -18,13 +18,20 @@ from core.bot.keyboards import (
     ACTION_EDIT,
     ACTION_PUBLISH_SITE,
     ACTION_REJECT,
+    ACTION_VIEW_FULL_SITE,
     edit_force_reply,
+)
+from core.bot.review_panels import (
+    register_review_panel,
+    remove_review_panels,
+    sync_review_panels,
 )
 from core.bot.services import (
     finalize_review_message,
     format_review_message,
     load_article_for_bot,
     resolve_image_url,
+    send_full_site_version,
     send_with_optional_image,
     update_review_message,
 )
@@ -60,6 +67,18 @@ def _review_keyboard(article: NewsArticle, *, publishing: bool = False):
     return review_keyboard_for_article(article, publishing=publishing)
 
 
+def _ensure_panel_registered(callback: CallbackQuery, article_id: int) -> None:
+    """Register the callback message in case this admin opened it before sync existed."""
+    if callback.message is None:
+        return
+    register_review_panel(
+        article_id,
+        callback.message.chat.id,
+        callback.message.message_id,
+        is_photo=bool(callback.message.photo),
+    )
+
+
 def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
     router = Router(name="review")
 
@@ -76,6 +95,8 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             await callback.answer("داده نامعتبر.")
             return
 
+        _ensure_panel_registered(callback, article_id)
+
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
@@ -89,10 +110,16 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         if article.status == NewsArticle.Status.PUBLISHED:
             await callback.answer("این خبر قبلاً به کانال ارسال شده است.", show_alert=True)
+            await sync_review_panels(
+                callback.bot,
+                article_id,
+                reply_markup=_review_keyboard(article),
+            )
             return
 
         if article.status == NewsArticle.Status.REJECTED:
-            await callback.answer("این خبر رد شده است.")
+            await callback.answer("این خبر رد شده است.", show_alert=True)
+            await remove_review_panels(callback.bot, article_id)
             return
 
         publish_text = normalize_telegram_text(article.telegram_text)
@@ -117,16 +144,11 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         article.status = NewsArticle.Status.PUBLISHED
         await sync_to_async(article.save)(update_fields=["status"])
         await callback.answer("✅ منتشر شد.")
-        preview_text = await sync_to_async(format_review_message)(
-            article,
-            is_photo=bool(callback.message.photo),
-        )
-        await update_review_message(
+        await sync_review_panels(
             callback.bot,
-            callback.message,
-            preview_text,
+            article_id,
             reply_markup=_review_keyboard(article),
-            suffix="✅ <b>تایید و ارسال شد.</b>",
+            suffix="✅ <b>تایید و ارسال شد به کانال.</b>",
         )
 
     @router.callback_query(F.data.startswith(f"{ACTION_REJECT}:"))
@@ -142,6 +164,8 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             await callback.answer("داده نامعتبر.")
             return
 
+        _ensure_panel_registered(callback, article_id)
+
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
@@ -153,14 +177,28 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             )
             return
 
+        if article.status == NewsArticle.Status.PUBLISHED:
+            await callback.answer(
+                "این خبر قبلاً منتشر شده و قابل رد نیست.",
+                show_alert=True,
+            )
+            await sync_review_panels(
+                callback.bot,
+                article_id,
+                reply_markup=_review_keyboard(article),
+            )
+            return
+
+        if article.status == NewsArticle.Status.REJECTED:
+            await callback.answer("این خبر قبلاً رد شده است.")
+            await remove_review_panels(callback.bot, article_id)
+            return
+
         article.status = NewsArticle.Status.REJECTED
         await sync_to_async(article.save)(update_fields=["status"])
         await callback.answer("❌ رد شد.")
-        await finalize_review_message(
-            callback.bot,
-            callback.message,
-            suffix="❌ <b>رد شد.</b>",
-        )
+        # Delete the preview from every admin's chat (fallback: mark as rejected).
+        await remove_review_panels(callback.bot, article_id)
 
     @router.callback_query(F.data.startswith(f"{ACTION_EDIT}:"))
     async def on_edit(callback: CallbackQuery, state: FSMContext) -> None:
@@ -173,6 +211,8 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             await callback.answer("داده نامعتبر.")
             return
 
+        _ensure_panel_registered(callback, article_id)
+
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
@@ -181,6 +221,11 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         if article.status != NewsArticle.Status.PENDING:
             await callback.answer("این خبر دیگر در انتظار تایید نیست.")
+            await sync_review_panels(
+                callback.bot,
+                article_id,
+                reply_markup=_review_keyboard(article),
+            )
             return
 
         parsed = parse_telegram_text(article.telegram_text)
@@ -239,6 +284,8 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             await callback.answer("داده نامعتبر.")
             return
 
+        _ensure_panel_registered(callback, article_id)
+
         try:
             article = await sync_to_async(load_article_for_bot)(article_id)
         except NewsArticle.DoesNotExist:
@@ -247,6 +294,11 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         if article.status != NewsArticle.Status.PENDING:
             await callback.answer("این خبر دیگر در انتظار تایید نیست.")
+            await sync_review_panels(
+                callback.bot,
+                article_id,
+                reply_markup=_review_keyboard(article),
+            )
             return
 
         parsed = parse_telegram_text(article.telegram_text)
@@ -267,6 +319,45 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
             parse_mode="HTML",
         )
 
+    @router.callback_query(F.data.startswith(f"{ACTION_VIEW_FULL_SITE}:"))
+    async def on_view_full_site(callback: CallbackQuery) -> None:
+        if not is_admin_user(callback.from_user, config.allowed_admin_ids):
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
+            return
+
+        article_id = _parse_article_id(callback.data)
+        if article_id is None or callback.message is None:
+            await callback.answer("داده نامعتبر.")
+            return
+
+        try:
+            article = await sync_to_async(load_article_for_bot)(article_id)
+        except NewsArticle.DoesNotExist:
+            await callback.answer("خبر پیدا نشد.", show_alert=True)
+            return
+
+        if not (article.site_body or "").strip() and not (article.site_title or "").strip():
+            await callback.answer("متن سایت برای این خبر موجود نیست.", show_alert=True)
+            return
+
+        await callback.answer()
+        try:
+            await send_full_site_version(
+                callback.bot,
+                callback.message.chat.id,
+                article,
+                reply_to_message_id=callback.message.message_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to send full site version for article %s: %r",
+                article_id,
+                exc,
+            )
+            await callback.message.answer(
+                f"❌ خطا در نمایش نسخه کامل سایت: {exc}",
+            )
+
     @router.callback_query(F.data.startswith(f"{ACTION_PUBLISH_SITE}:"))
     async def on_publish_site(callback: CallbackQuery, state: FSMContext) -> None:
         if not is_admin_user(callback.from_user, config.allowed_admin_ids):
@@ -279,6 +370,8 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
         if article_id is None or callback.message is None or callback.from_user is None:
             await callback.answer("داده نامعتبر.")
             return
+
+        _ensure_panel_registered(callback, article_id)
 
         if is_site_publish_in_progress(article_id):
             await callback.answer("انتشار این خبر در حال انجام است.", show_alert=True)
@@ -297,10 +390,16 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         if is_site_published(article_id):
             await callback.answer("این خبر قبلاً روی سایت منتشر شده است.", show_alert=True)
+            await sync_review_panels(
+                callback.bot,
+                article_id,
+                reply_markup=_review_keyboard(article),
+            )
             return
 
         if article.status == NewsArticle.Status.REJECTED:
             await callback.answer("این خبر رد شده است.")
+            await remove_review_panels(callback.bot, article_id)
             return
 
         missing_fields: list[str] = []
@@ -320,25 +419,18 @@ def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
 
         await callback.answer("انتشار در پس‌زمینه آغاز شد.")
 
-        preview_text = await sync_to_async(format_review_message)(
-            article,
-            is_photo=bool(callback.message.photo),
-        )
-        await update_review_message(
+        await sync_review_panels(
             callback.bot,
-            callback.message,
-            preview_text,
+            article_id,
             reply_markup=_review_keyboard(article, publishing=True),
             suffix="⏳ <b>در حال انتشار روی سایت...</b>",
+            include_status_suffix=False,
         )
 
         asyncio.create_task(
             run_site_publish_job(
                 bot=callback.bot,
                 article_id=article_id,
-                review_chat_id=callback.message.chat.id,
-                review_message_id=callback.message.message_id,
-                review_is_photo=bool(callback.message.photo),
             )
         )
 

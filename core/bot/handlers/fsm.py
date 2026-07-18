@@ -12,11 +12,11 @@ from asgiref.sync import sync_to_async
 from core.bot.auth import AdminFilter
 from core.bot.config import BotConfig
 from core.bot.keyboards import CHECK_PENDING_BUTTON, admin_main_menu
+from core.bot.review_panels import register_review_panel, sync_review_panels
 from core.bot.site_publish import review_keyboard_for_article
 from core.bot.services import (
     is_valid_http_url,
     load_article_for_bot,
-    refresh_article_preview,
 )
 from core.bot.states import AddLinkStates, EditNewsStates
 from core.bot.text_compose import compose_telegram_text, inject_site_link, parse_telegram_text
@@ -34,16 +34,19 @@ async def _update_preview_after_change(
     preview_chat_id = data.get("preview_chat_id")
     preview_message_id = data.get("preview_message_id")
     preview_is_photo = data.get("preview_is_photo", False)
-    if not preview_chat_id or not preview_message_id:
-        return
+    if preview_chat_id and preview_message_id:
+        register_review_panel(
+            article.id,
+            preview_chat_id,
+            preview_message_id,
+            is_photo=bool(preview_is_photo),
+        )
 
-    await refresh_article_preview(
+    await sync_review_panels(
         message.bot,
-        chat_id=preview_chat_id,
-        message_id=preview_message_id,
-        article=article,
+        article.id,
         reply_markup=review_keyboard_for_article(article),
-        is_photo=bool(preview_is_photo),
+        include_status_suffix=False,
     )
 
 
