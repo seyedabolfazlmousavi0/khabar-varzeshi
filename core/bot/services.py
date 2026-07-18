@@ -118,6 +118,25 @@ def _truncate_telegram_html(text: str, max_length: int) -> str:
     return text[:keep].rstrip() + _TRUNCATION_SUFFIX
 
 
+def _format_source_link(article: NewsArticle) -> str:
+    """Source name as HTML anchor pointing at the original scraped article URL."""
+    source_name = ""
+    try:
+        source_name = (article.source.name or "").strip()
+    except Exception:
+        source_name = ""
+    if not source_name:
+        source_name = "منبع"
+
+    href = (article.original_url or "").strip()
+    if not href:
+        return f"🔗 {html.escape(source_name)}"
+
+    safe_href = html.escape(href, quote=True)
+    safe_name = html.escape(source_name)
+    return f'🔗 <a href="{safe_href}">{safe_name}</a>'
+
+
 def format_article_message(
     article: NewsArticle,
     *,
@@ -127,12 +146,14 @@ def format_article_message(
     lead = html.escape(article.site_lead or "—")
     site_body = html.escape((article.site_body or "").strip() or "—")
     telegram_text = _format_telegram_preview(article.telegram_text)
+    source_link = _format_source_link(article)
 
     header = (
         f"📰 <b>تیتر:</b> {title}\n\n"
         f"📝 <b>لید:</b> {lead}\n\n"
         f"📄 <b>متن سایت:</b>\n{site_body}\n\n"
-        f"📱 <b>تلگرام:</b>\n{telegram_text}"
+        f"📱 <b>تلگرام:</b>\n{telegram_text}\n\n"
+        f"{source_link}"
     )
 
     if max_length is None:
@@ -141,13 +162,13 @@ def format_article_message(
     if len(header) <= max_length:
         return header
 
-    # Preserve title/lead/telegram; shrink the site-body block to fit.
+    # Preserve title/lead/telegram/source; shrink the site-body block to fit.
     prefix = (
         f"📰 <b>تیتر:</b> {title}\n\n"
         f"📝 <b>لید:</b> {lead}\n\n"
         f"📄 <b>متن سایت:</b>\n"
     )
-    suffix = f"\n\n📱 <b>تلگرام:</b>\n{telegram_text}"
+    suffix = f"\n\n📱 <b>تلگرام:</b>\n{telegram_text}\n\n{source_link}"
     body_budget = max_length - len(prefix) - len(suffix) - len(_TRUNCATION_SUFFIX)
     if body_budget > 0:
         trimmed_body = site_body[:body_budget].rstrip() + _TRUNCATION_SUFFIX
@@ -182,11 +203,13 @@ def format_full_site_version(article: NewsArticle) -> str:
     title = html.escape(article.site_title or article.original_title or "—")
     lead = html.escape(article.site_lead or "—")
     body = html.escape(_site_body_as_plain_text(article.site_body))
+    source_link = _format_source_link(article)
     return (
         f"📄 <b>نسخه کامل سایت — خبر #{article.id}</b>\n\n"
         f"📰 <b>تیتر:</b>\n{title}\n\n"
         f"📝 <b>لید:</b>\n{lead}\n\n"
-        f"📄 <b>متن:</b>\n{body}"
+        f"📄 <b>متن:</b>\n{body}\n\n"
+        f"{source_link}"
     )
 
 
