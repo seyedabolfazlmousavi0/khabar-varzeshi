@@ -1,5 +1,8 @@
-"""Periodic worker: every 2 minutes, run `fetch_news` and notify the admin
+"""Periodic worker: every hour, run `fetch_news` and notify the admin
 Telegram chat about any newly extracted articles.
+
+The editorial Telegram bot (run_bot) stays online separately all day;
+this hourly schedule only governs news ingestion / Gemini rewriting.
 
 Run with:
 
@@ -48,15 +51,18 @@ from core.models import NewsArticle
 
 logger = logging.getLogger(__name__)
 
-CHECK_INTERVAL_MINUTES = 2
+CHECK_INTERVAL_HOURS = 1
 
 
 class Command(BaseCommand):
     help = (
         "Run the periodic worker. Every "
-        f"{CHECK_INTERVAL_MINUTES} minute(s) the worker calls `fetch_news` "
+        f"{CHECK_INTERVAL_HOURS} hour(s) the worker calls `fetch_news` "
         "and, if new pending articles were added, notifies the admin "
-        "Telegram chat."
+        "Telegram chat. "
+        "Each fetch_news cycle rewrites at most 10 new articles with "
+        "≥5 minutes between Gemini requests; already-stored URLs are never "
+        "rewritten again."
     )
 
     def handle(self, *args: Any, **options: Any) -> None:
@@ -137,16 +143,20 @@ class Command(BaseCommand):
                     )
                 )
 
-        schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(job)
+        schedule.every(CHECK_INTERVAL_HOURS).hours.do(job)
 
         self.stdout.write(
             self.style.SUCCESS(
                 f"Worker started. Running `fetch_news` every "
-                f"{CHECK_INTERVAL_MINUTES} minute(s). "
+                f"{CHECK_INTERVAL_HOURS} hour(s) "
+                f"(max 10 Gemini rewrites/cycle, ≥5 min between requests). "
                 f"Admin IDs: {', '.join(str(i) for i in sorted(config.allowed_admin_ids))}. "
-                "Press Ctrl+C to stop."
+                "First cycle starts now. Press Ctrl+C to stop."
             )
         )
+
+        # Run once immediately, then every CHECK_INTERVAL_HOURS thereafter.
+        job()
 
         try:
             while True:

@@ -61,6 +61,11 @@ DEFAULT_GEMINI_MODEL = "models/gemini-2.5-flash-lite"
 GEMINI_REQUEST_TIMEOUT = 120  # seconds
 TELEGRAM_CHANNEL_ID = "@KhabarVarzeshi"
 
+# Per-run rewrite budget and spacing between Gemini calls.
+# Already-stored article URLs are never sent to Gemini again (see _article_exists).
+MAX_REWRITES_PER_RUN = 10
+GEMINI_MIN_INTERVAL_SECONDS = 5 * 60  # 5 minutes between rewrite requests
+
 # Every timeout-shaped exception we may encounter from any HTTP library.
 TIMEOUT_EXCEPTIONS: tuple[type[BaseException], ...] = (
     httpx.ReadTimeout,
@@ -232,7 +237,10 @@ def _extract_image_candidates(
 class Command(BaseCommand):
     help = (
         "Fetch every active RSS source, rewrite each new article with Gemini, "
-        "and store the result as a pending NewsArticle."
+        "and store the result as a pending NewsArticle. "
+        f"At most {MAX_REWRITES_PER_RUN} new articles are rewritten per run, "
+        f"with ≥{GEMINI_MIN_INTERVAL_SECONDS // 60} minutes between Gemini "
+        "requests. URLs already in the database are never rewritten again."
     )
 
     def handle(self, *args: Any, **options: Any) -> None:
@@ -256,6 +264,15 @@ class Command(BaseCommand):
             temperature=0.7,
         )
         self.stdout.write(f"Using Gemini model: {model_name}")
+        self.stdout.write(
+            f"Rewrite budget this run: {MAX_REWRITES_PER_RUN} Gemini requests, "
+            f"min {GEMINI_MIN_INTERVAL_SECONDS // 60} min between them."
+        )
+
+        # Per-run counters: at most MAX_REWRITES_PER_RUN Gemini calls.
+        # Already-stored URLs are never sent to Gemini (DB uniqueness).
+        self._gemini_requests_done = 0
+        self._last_gemini_at: float | None = None
 
         def _dedup_log(message: str) -> None:
             self.stdout.write(self.style.HTTP_INFO(f"  [semantic-dedup] {message}"))
@@ -276,8 +293,13 @@ class Command(BaseCommand):
             "semantic_skipped": 0,
             "errors": 0,
         }
+        limit_reached = False
 
         for source in sources:
+            if self._gemini_requests_done >= MAX_REWRITES_PER_RUN:
+                limit_reached = True
+                break
+
             self.stdout.write(
                 self.style.MIGRATE_HEADING(f"\n>>> {source.name} ({source.url})")
             )
@@ -301,6 +323,10 @@ class Command(BaseCommand):
                 continue
 
             for entry in feed.entries:
+                if self._gemini_requests_done >= MAX_REWRITES_PER_RUN:
+                    limit_reached = True
+                    break
+
                 stats = self._process_entry(
                     entry,
                     source,
@@ -312,6 +338,18 @@ class Command(BaseCommand):
                 for key, value in stats.items():
                     totals[key] += value
 
+            if limit_reached:
+                break
+
+        if limit_reached:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"\nReached rewrite budget ({MAX_REWRITES_PER_RUN} Gemini "
+                    "requests). Remaining feed entries will wait for the next "
+                    "hourly cycle."
+                )
+            )
+
         self.stdout.write(
             self.style.SUCCESS(
                 "\nDone. "
@@ -321,6 +359,26 @@ class Command(BaseCommand):
                 f"errors: {totals['errors']}."
             )
         )
+
+    def _wait_for_gemini_slot(self) -> None:
+        """Block until at least GEMINI_MIN_INTERVAL_SECONDS since the last request."""
+        if self._last_gemini_at is None:
+            return
+
+        elapsed = time.monotonic() - self._last_gemini_at
+        remaining = GEMINI_MIN_INTERVAL_SECONDS - elapsed
+        if remaining <= 0:
+            return
+
+        minutes = remaining / 60.0
+        self.stdout.write(
+            self.style.HTTP_INFO(
+                f"  ⏳ waiting {remaining:.0f}s ({minutes:.1f} min) before next "
+                f"Gemini rewrite "
+                f"({self._gemini_requests_done}/{MAX_REWRITES_PER_RUN} requests used)..."
+            )
+        )
+        time.sleep(remaining)
 
     def _scrape_log(self, message: str, error: bool = False) -> None:
         timestamp = time.strftime("%H:%M:%S")
@@ -359,6 +417,8 @@ class Command(BaseCommand):
                 f"  → URL normalized: {link!r} → {canonical_url!r}"
             )
 
+        # Hard guarantee: any URL already in the DB (pending/published/rejected)
+        # is never sent to Gemini again — including on later hourly cycles.
         if self._article_exists(canonical_url):
             self.stdout.write(
                 f"  - duplicate, skipped: {title[:80]} ({canonical_url})"
@@ -440,14 +500,22 @@ class Command(BaseCommand):
             content=clean_text[:8000],
         )
 
+        self._wait_for_gemini_slot()
+
+        self._gemini_requests_done += 1
         self.stdout.write(self.style.HTTP_INFO(
             f"  → Gemini request "
             f"| model={model_name!r} "
             f"| prompt={len(prompt)} chars "
             f"| timeout={GEMINI_REQUEST_TIMEOUT}s "
+            f"| request={self._gemini_requests_done}/{MAX_REWRITES_PER_RUN} "
             f"| config={{response_mime_type={generation_config.response_mime_type!r}, "
             f"temperature={generation_config.temperature}}}"
         ))
+
+        # Stamp before the call so spacing is measured between request starts
+        # (and still ≥5 min even if a call fails).
+        self._last_gemini_at = time.monotonic()
 
         try:
             response = client.models.generate_content(
@@ -506,7 +574,12 @@ class Command(BaseCommand):
                 stats["skipped"] += 1
                 return stats
 
-            self.stdout.write(self.style.SUCCESS(f"  + created: {title[:80]}"))
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"  + created: {title[:80]} "
+                    f"(Gemini {self._gemini_requests_done}/{MAX_REWRITES_PER_RUN})"
+                )
+            )
             stats["created"] += 1
 
         except TIMEOUT_EXCEPTIONS as exc:
