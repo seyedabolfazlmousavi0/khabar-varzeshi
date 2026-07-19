@@ -56,6 +56,8 @@ BTN_PUBLISH_SITE = "انتشار خبر در سایت"
 BTN_PUBLISH_SITE_IN_PROGRESS = "⏳ در حال انتشار..."
 BTN_PUBLISH_SITE_DONE = "✅ منتشر شد در سایت"
 BTN_VIEW_FULL_SITE = "دیدن نسخه کامل سایت:"
+BTN_DIGEST_PREV = "۱۰ خبر قبلی"
+BTN_DIGEST_NEXT = "۱۰ خبر بعدی"
 
 ACTION_APPROVE = "approve"
 ACTION_REJECT = "reject"
@@ -63,6 +65,8 @@ ACTION_EDIT = "edit"
 ACTION_ADD_LINK = "addlink"
 ACTION_PUBLISH_SITE = "publish_site"
 ACTION_VIEW_FULL_SITE = "view_site"
+ACTION_DIGEST_PAGE = "digest"
+ACTION_OPEN_ARTICLE = "open"
 
 
 def main_menu() -> ReplyKeyboardMarkup:
@@ -143,3 +147,52 @@ def article_review_keyboard(
             [view_full_site_button],
         ]
     )
+
+
+def digest_keyboard(
+    articles: list,
+    *,
+    page: int,
+    total: int,
+    page_size: int = 10,
+) -> InlineKeyboardMarkup:
+    """Pagination + numbered open buttons for the digest list."""
+    _persian = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # Numbered glass buttons so each item can be opened even without deep links.
+    number_row: list[InlineKeyboardButton] = []
+    start_index = page * page_size
+    for offset, article in enumerate(articles):
+        number_row.append(
+            InlineKeyboardButton(
+                text=str(start_index + offset + 1).translate(_persian),
+                callback_data=f"{ACTION_OPEN_ARTICLE}:{article.id}",
+            )
+        )
+        if len(number_row) == 5:
+            rows.append(number_row)
+            number_row = []
+    if number_row:
+        rows.append(number_row)
+
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton(
+                text=BTN_DIGEST_PREV,
+                callback_data=f"{ACTION_DIGEST_PAGE}:{page - 1}",
+            )
+        )
+    if (page + 1) * page_size < total:
+        nav_row.append(
+            InlineKeyboardButton(
+                text=BTN_DIGEST_NEXT,
+                callback_data=f"{ACTION_DIGEST_PAGE}:{page + 1}",
+            )
+        )
+    if nav_row:
+        rows.append(nav_row)
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -31,7 +31,7 @@ class BotConfig:
     token: str
     allowed_admin_ids: frozenset[int]
     public_channel_id: str
-    pending_batch_size: int = 20
+    pending_batch_size: int = 10
 
 
 def load_bot_config() -> BotConfig:

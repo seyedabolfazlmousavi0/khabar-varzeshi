@@ -19,6 +19,12 @@ from core.models import NewsArticle
 logger = logging.getLogger(__name__)
 
 PENDING_BATCH_SIZE = 20
+DIGEST_PAGE_SIZE = 10
+DIGEST_LOOKBACK_HOURS = 24
+DIGEST_LEAD_MAX_CHARS = 220
+DIGEST_HEADER = "۱۰ خبر برگزیده ۲۴ ساعت اخیر از منابع منتخب"
+NEWS_DEEP_LINK_PREFIX = "news_"
+_PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_MESSAGE_LIMIT = 4096
 _TRUNCATION_SUFFIX = "\n\n… (ادامهٔ متن حذف شد)"
@@ -73,6 +79,129 @@ def load_pending_articles(batch_size: int = PENDING_BATCH_SIZE) -> list[NewsArti
         .values_list("pk", flat=True)[:batch_size]
     )
     return [load_article_for_bot(pk) for pk in pending_ids]
+
+
+def to_persian_digits(value: int | str) -> str:
+    return str(value).translate(_PERSIAN_DIGITS)
+
+
+def load_pending_digest_page(
+    page: int = 0,
+    *,
+    page_size: int = DIGEST_PAGE_SIZE,
+    lookback_hours: int = DIGEST_LOOKBACK_HOURS,
+) -> tuple[list[NewsArticle], int]:
+    """Return one page of recent pending articles and the total matching count."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    close_old_connections()
+    page = max(0, int(page))
+    page_size = max(1, int(page_size))
+    since = timezone.now() - timedelta(hours=lookback_hours)
+
+    qs = (
+        NewsArticle.objects.using("default")
+        .filter(
+            status=NewsArticle.Status.PENDING,
+            created_at__gte=since,
+        )
+        .order_by("-created_at")
+    )
+    total = qs.count()
+    offset = page * page_size
+    pending_ids = list(qs.values_list("pk", flat=True)[offset : offset + page_size])
+    return [load_article_for_bot(pk) for pk in pending_ids], total
+
+
+def _truncate_plain(text: str, max_chars: int) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def format_digest_message(
+    articles: list[NewsArticle],
+    *,
+    page: int = 0,
+    bot_username: str | None = None,
+    page_size: int = DIGEST_PAGE_SIZE,
+) -> str:
+    """Build the numbered digest list shown to admins."""
+    lines: list[str] = [DIGEST_HEADER, ""]
+    start_index = page * page_size
+
+    for offset, article in enumerate(articles):
+        number = to_persian_digits(start_index + offset + 1)
+        title = (article.site_title or article.original_title or "بدون تیتر").strip()
+        safe_title = html.escape(title)
+        original_url = (article.original_url or "").strip()
+        safe_url = html.escape(original_url, quote=True) if original_url else ""
+
+        try:
+            source_name = html.escape((article.source.name or "").strip() or "منبع")
+        except Exception:
+            source_name = "منبع"
+
+        if bot_username:
+            deep_link = (
+                f"https://t.me/{bot_username}?start={NEWS_DEEP_LINK_PREFIX}{article.id}"
+            )
+            title_html = f'<a href="{html.escape(deep_link, quote=True)}">{safe_title}</a>'
+        else:
+            title_html = f"<b>{safe_title}</b>"
+
+        if original_url:
+            url_html = f'(<a href="{safe_url}">{html.escape(original_url)}</a>)'
+        else:
+            url_html = "(—)"
+
+        lead = _truncate_plain(article.site_lead or "", DIGEST_LEAD_MAX_CHARS)
+        lead_html = html.escape(lead) if lead else "—"
+
+        lines.append(f"{number}- {title_html} {url_html} / {source_name}")
+        lines.append(lead_html)
+        lines.append("")
+
+    text = "\n".join(lines).rstrip()
+    if len(text) <= TELEGRAM_MESSAGE_LIMIT:
+        return text
+    return text[: TELEGRAM_MESSAGE_LIMIT - 1].rstrip() + "…"
+
+
+async def send_article_review_card(
+    bot: Bot,
+    chat_id: Any,
+    article: NewsArticle,
+) -> Message | None:
+    """Send the full review card (preview + action buttons) for one article."""
+    from asgiref.sync import sync_to_async
+
+    from core.bot.review_panels import register_review_panel
+    from core.bot.site_publish import review_keyboard_for_article
+
+    image_url = await sync_to_async(resolve_image_url)(article)
+    preview_text = await sync_to_async(format_review_message)(
+        article,
+        is_photo=bool(image_url),
+    )
+    sent = await send_with_optional_image(
+        bot,
+        chat_id,
+        preview_text,
+        image_url,
+        reply_markup=review_keyboard_for_article(article),
+    )
+    if sent is not None:
+        register_review_panel(
+            article.id,
+            sent.chat.id,
+            sent.message_id,
+            is_photo=bool(sent.photo),
+        )
+    return sent
 
 
 def resolve_image_url(article: NewsArticle) -> str | None:

@@ -1,138 +1,140 @@
-"""Fetch and display pending articles for admin review."""
+"""Fetch and display pending articles as a paginated digest list."""
 
 from __future__ import annotations
 
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from asgiref.sync import sync_to_async
 
 from core.bot.auth import AdminFilter, is_admin_user
 from core.bot.config import BotConfig
 from core.bot.keyboards import (
+    ACTION_DIGEST_PAGE,
+    ACTION_OPEN_ARTICLE,
     CHECK_PENDING_BUTTON,
     CheckPendingButtonFilter,
+    digest_keyboard,
     main_menu,
     normalize_button_text,
 )
-from core.bot.review_panels import register_review_panel
-from core.bot.site_publish import review_keyboard_for_article
 from core.bot.services import (
-    format_review_message,
-    load_pending_articles,
-    resolve_image_url,
-    send_with_optional_image,
+    DIGEST_PAGE_SIZE,
+    format_digest_message,
+    load_article_for_bot,
+    load_pending_digest_page,
+    send_article_review_card,
 )
+from core.models import NewsArticle
 
 logger = logging.getLogger(__name__)
 
+_bot_username_cache: str | None = None
 
-async def _send_pending_batch(message: Message, config: BotConfig) -> None:
-    print("[check_pending] _send_pending_batch: ENTER", flush=True)
-    print(
-        f"[check_pending] _send_pending_batch: chat_id={message.chat.id} "
-        f"batch_size={config.pending_batch_size}",
-        flush=True,
+
+async def _resolve_bot_username(bot) -> str | None:
+    global _bot_username_cache
+    if _bot_username_cache:
+        return _bot_username_cache
+    try:
+        me = await bot.get_me()
+        _bot_username_cache = me.username
+    except Exception as exc:
+        logger.warning("Could not resolve bot username for digest deep links: %r", exc)
+        _bot_username_cache = None
+    return _bot_username_cache
+
+
+async def _render_digest_page(
+    *,
+    bot,
+    chat_id: int,
+    page: int,
+    edit_message: Message | None = None,
+) -> None:
+    articles, total = await sync_to_async(load_pending_digest_page)(
+        page,
+        page_size=DIGEST_PAGE_SIZE,
     )
 
-    print("[check_pending] _send_pending_batch: before load_pending_articles", flush=True)
-    pending = await sync_to_async(load_pending_articles)(config.pending_batch_size)
-    print(
-        f"[check_pending] _send_pending_batch: after load_pending_articles "
-        f"count={len(pending)}",
-        flush=True,
-    )
-
-    if not pending:
-        print("[check_pending] _send_pending_batch: no pending — sending empty reply", flush=True)
-        await message.answer("هیچ خبر در انتظار تاییدی وجود ندارد.")
-        print("[check_pending] _send_pending_batch: empty reply sent — EXIT", flush=True)
+    if total == 0:
+        text = "هیچ خبری در ۲۴ ساعت اخیر در انتظار تایید نیست."
+        if edit_message is not None:
+            try:
+                await edit_message.edit_text(text, reply_markup=None)
+            except Exception:
+                await bot.send_message(chat_id, text)
+        else:
+            await bot.send_message(chat_id, text)
         return
 
-    print("[check_pending] _send_pending_batch: before summary message.answer", flush=True)
-    await message.answer(
-        f"📋 <b>{len(pending)}</b> خبر در انتظار تایید:",
-        parse_mode="HTML",
+    # If the requested page is past the end (e.g. after rejects), clamp.
+    max_page = max(0, (total - 1) // DIGEST_PAGE_SIZE)
+    if page > max_page:
+        page = max_page
+        articles, total = await sync_to_async(load_pending_digest_page)(
+            page,
+            page_size=DIGEST_PAGE_SIZE,
+        )
+
+    bot_username = await _resolve_bot_username(bot)
+    text = format_digest_message(
+        articles,
+        page=page,
+        bot_username=bot_username,
+        page_size=DIGEST_PAGE_SIZE,
     )
-    print("[check_pending] _send_pending_batch: after summary message.answer", flush=True)
+    markup = digest_keyboard(
+        articles,
+        page=page,
+        total=total,
+        page_size=DIGEST_PAGE_SIZE,
+    )
 
-    for index, article in enumerate(pending, start=1):
-        print(
-            f"[check_pending] _send_pending_batch: loop START article "
-            f"{index}/{len(pending)} id={article.id}",
-            flush=True,
-        )
-
-        print(
-            f"[check_pending] _send_pending_batch: before resolve_image_url "
-            f"article_id={article.id}",
-            flush=True,
-        )
-        image_url = await sync_to_async(resolve_image_url)(article)
-        print(
-            f"[check_pending] _send_pending_batch: after resolve_image_url "
-            f"article_id={article.id} image_url={image_url!r}",
-            flush=True,
-        )
-
-        print(
-            f"[check_pending] _send_pending_batch: before format_article_message "
-            f"article_id={article.id}",
-            flush=True,
-        )
-        preview_text = await sync_to_async(format_review_message)(
-            article,
-            is_photo=bool(image_url),
-        )
-        print(
-            f"[check_pending] _send_pending_batch: after format_review_message "
-            f"article_id={article.id} text_len={len(preview_text)}",
-            flush=True,
-        )
-
+    if edit_message is not None:
         try:
-            print(
-                f"[check_pending] _send_pending_batch: before send_with_optional_image "
-                f"article_id={article.id}",
-                flush=True,
+            await edit_message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=markup,
+                disable_web_page_preview=True,
             )
-            sent = await send_with_optional_image(
-                message.bot,
-                message.chat.id,
-                preview_text,
-                image_url,
-                reply_markup=review_keyboard_for_article(article),
-            )
-            if sent is not None:
-                register_review_panel(
-                    article.id,
-                    sent.chat.id,
-                    sent.message_id,
-                    is_photo=bool(sent.photo),
-                )
-            print(
-                f"[check_pending] _send_pending_batch: after send_with_optional_image "
-                f"article_id={article.id}",
-                flush=True,
-            )
+            return
         except Exception as exc:
-            print(
-                f"[check_pending] _send_pending_batch: send FAILED article_id={article.id} "
-                f"exc={exc!r}",
-                flush=True,
-            )
-            logger.warning("Failed to send article %s: %r", article.id, exc)
+            logger.info("Digest edit failed, sending new message: %r", exc)
 
-        print(
-            f"[check_pending] _send_pending_batch: loop END article "
-            f"{index}/{len(pending)} id={article.id}",
-            flush=True,
-        )
+    await bot.send_message(
+        chat_id,
+        text,
+        parse_mode="HTML",
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
 
-    print("[check_pending] _send_pending_batch: EXIT (all articles sent)", flush=True)
+
+async def _send_pending_digest(message: Message) -> None:
+    await _render_digest_page(
+        bot=message.bot,
+        chat_id=message.chat.id,
+        page=0,
+    )
+
+
+async def _open_article_detail(bot, chat_id: int, article_id: int) -> str | None:
+    """Send full review card. Returns an optional alert string for callback.answer."""
+    try:
+        article = await sync_to_async(load_article_for_bot)(article_id)
+    except NewsArticle.DoesNotExist:
+        return "خبر پیدا نشد."
+
+    if article.status == NewsArticle.Status.REJECTED:
+        return "این خبر رد شده است."
+
+    await send_article_review_card(bot, chat_id, article)
+    return None
 
 
 async def _handle_check_pending(
@@ -140,8 +142,7 @@ async def _handle_check_pending(
     state: FSMContext,
     config: BotConfig,
 ) -> None:
-    """Show pending articles for admin review — never runs ingestion."""
-    print("[check_pending] _handle_check_pending: ENTER", flush=True)
+    """Show the digest list for admin review — never runs ingestion."""
     await state.clear()
 
     if normalize_button_text(message.text) != normalize_button_text(CHECK_PENDING_BUTTON):
@@ -157,23 +158,70 @@ async def _handle_check_pending(
         )
         return
 
-    print("[check_pending] _handle_check_pending: before _send_pending_batch", flush=True)
-    await _send_pending_batch(message, config)
-    print("[check_pending] _handle_check_pending: EXIT", flush=True)
+    await _send_pending_digest(message)
 
 
 def build_router(config: BotConfig, admin_filter: AdminFilter) -> Router:
-    print("[check_pending] build_router: ENTER", flush=True)
     router = Router(name="check_pending")
 
     @router.message(Command("check_pending"), admin_filter)
     async def cmd_check_pending(message: Message, state: FSMContext) -> None:
         await state.clear()
-        await _send_pending_batch(message, config)
+        await _send_pending_digest(message)
 
     @router.message(CheckPendingButtonFilter())
     async def btn_check_pending(message: Message, state: FSMContext) -> None:
         await _handle_check_pending(message, state, config)
 
-    print("[check_pending] build_router: EXIT (handlers registered)", flush=True)
+    @router.callback_query(F.data.startswith(f"{ACTION_DIGEST_PAGE}:"))
+    async def on_digest_page(callback: CallbackQuery) -> None:
+        if not is_admin_user(callback.from_user, config.allowed_admin_ids):
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
+            return
+
+        if callback.message is None or not callback.data:
+            await callback.answer("داده نامعتبر.")
+            return
+
+        try:
+            page = int(callback.data.split(":", 1)[1])
+        except ValueError:
+            await callback.answer("صفحه نامعتبر.")
+            return
+
+        page = max(0, page)
+        await _render_digest_page(
+            bot=callback.bot,
+            chat_id=callback.message.chat.id,
+            page=page,
+            edit_message=callback.message,
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith(f"{ACTION_OPEN_ARTICLE}:"))
+    async def on_open_article(callback: CallbackQuery) -> None:
+        if not is_admin_user(callback.from_user, config.allowed_admin_ids):
+            await callback.answer("دسترسی مجاز نیست.", show_alert=True)
+            return
+
+        if callback.message is None or not callback.data:
+            await callback.answer("داده نامعتبر.")
+            return
+
+        try:
+            article_id = int(callback.data.split(":", 1)[1])
+        except ValueError:
+            await callback.answer("داده نامعتبر.")
+            return
+
+        alert = await _open_article_detail(
+            callback.bot,
+            callback.message.chat.id,
+            article_id,
+        )
+        if alert:
+            await callback.answer(alert, show_alert=True)
+            return
+        await callback.answer()
+
     return router
