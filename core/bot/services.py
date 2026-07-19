@@ -144,6 +144,10 @@ def format_digest_message(
 ) -> str:
     """Build the numbered digest list shown to admins.
 
+    Format per item:
+        N- <a href="bot deep link">Title</a> / <a href="original">Source</a>
+        lead…
+
     Never hard-truncates the final HTML string (that breaks Telegram ``<a>`` tags).
     Fits under the message limit by shortening leads instead.
     """
@@ -154,7 +158,6 @@ def format_digest_message(
         for offset, article in enumerate(articles):
             number = to_persian_digits(start_index + offset + 1)
             title = (article.site_title or article.original_title or "بدون تیتر").strip()
-            # Strip characters that can confuse Telegram HTML even after escape.
             title = title.replace("\n", " ").replace("\r", " ")
             safe_title = html.escape(title, quote=False)
 
@@ -177,21 +180,16 @@ def format_digest_message(
             else:
                 title_html = f"<b>{safe_title}</b>"
 
-            original_url = (article.original_url or "").strip()
-            href = _telegram_href(original_url)
-            if href:
-                # Keep URL visible, but escape entity-sensitive chars (&, <, >).
-                url_label = html.escape(original_url, quote=False)
-                url_html = f'(<a href="{href}">{url_label}</a>)'
-            elif original_url:
-                url_html = f"({html.escape(original_url, quote=False)})"
+            original_href = _telegram_href((article.original_url or "").strip())
+            if original_href:
+                source_html = f'<a href="{original_href}">{source_name}</a>'
             else:
-                url_html = "(—)"
+                source_html = source_name
 
             lead = _truncate_plain(article.site_lead or "", lead_max)
             lead_html = html.escape(lead, quote=False) if lead else "—"
 
-            lines.append(f"{number}- {title_html} {url_html} / {source_name}")
+            lines.append(f"{number}- {title_html} / {source_html}")
             lines.append(lead_html)
             lines.append("")
 
@@ -208,33 +206,8 @@ def format_digest_message(
         if len(text) <= TELEGRAM_MESSAGE_LIMIT:
             return text
 
-    # Absolute fallback: titles only, no original-url anchors (plain escaped URL).
-    lines = [DIGEST_HEADER, ""]
-    for offset, article in enumerate(articles):
-        number = to_persian_digits(start_index + offset + 1)
-        title = html.escape(
-            (article.site_title or article.original_title or "بدون تیتر").strip(),
-            quote=False,
-        )
-        try:
-            source_name = html.escape(
-                (article.source.name or "").strip() or "منبع",
-                quote=False,
-            )
-        except Exception:
-            source_name = "منبع"
-        original_url = html.escape((article.original_url or "").strip() or "—", quote=False)
-        if bot_username:
-            deep_link = (
-                f"https://t.me/{bot_username}"
-                f"?start={NEWS_DEEP_LINK_PREFIX}{article.id}"
-            )
-            title_html = f'<a href="{html.escape(deep_link, quote=True)}">{title}</a>'
-        else:
-            title_html = f"<b>{title}</b>"
-        lines.append(f"{number}- {title_html} ({original_url}) / {source_name}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
+    # Absolute fallback: titles + sources only (still proper anchors, no leads).
+    return _build(0)
 
 
 async def send_article_review_card(

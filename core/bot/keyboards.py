@@ -156,27 +156,7 @@ def digest_keyboard(
     total: int,
     page_size: int = 10,
 ) -> InlineKeyboardMarkup:
-    """Pagination + numbered open buttons for the digest list."""
-    _persian = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
-
-    rows: list[list[InlineKeyboardButton]] = []
-
-    # Numbered glass buttons so each item can be opened even without deep links.
-    number_row: list[InlineKeyboardButton] = []
-    start_index = page * page_size
-    for offset, article in enumerate(articles):
-        number_row.append(
-            InlineKeyboardButton(
-                text=str(start_index + offset + 1).translate(_persian),
-                callback_data=f"{ACTION_OPEN_ARTICLE}:{article.id}",
-            )
-        )
-        if len(number_row) == 5:
-            rows.append(number_row)
-            number_row = []
-    if number_row:
-        rows.append(number_row)
-
+    """Prev/next pagination only for the digest list."""
     nav_row: list[InlineKeyboardButton] = []
     if page > 0:
         nav_row.append(
@@ -192,7 +172,6 @@ def digest_keyboard(
                 callback_data=f"{ACTION_DIGEST_PAGE}:{page + 1}",
             )
         )
-    if nav_row:
-        rows.append(nav_row)
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    if not nav_row:
+        return InlineKeyboardMarkup(inline_keyboard=[])
+    return InlineKeyboardMarkup(inline_keyboard=[nav_row])
