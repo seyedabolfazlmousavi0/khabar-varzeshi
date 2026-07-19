@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import html
 import logging
+import re
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -46,6 +49,45 @@ async def _resolve_bot_username(bot) -> str | None:
         logger.warning("Could not resolve bot username for digest deep links: %r", exc)
         _bot_username_cache = None
     return _bot_username_cache
+
+
+async def _send_or_edit_digest(
+    *,
+    bot,
+    chat_id: int,
+    text: str,
+    markup,
+    edit_message: Message | None = None,
+) -> None:
+    """Send/edit digest HTML; fall back to plain text if Telegram rejects entities."""
+    kwargs = {
+        "parse_mode": "HTML",
+        "reply_markup": markup,
+        "disable_web_page_preview": True,
+    }
+    try:
+        if edit_message is not None:
+            await edit_message.edit_text(text, **kwargs)
+        else:
+            await bot.send_message(chat_id, text, **kwargs)
+        return
+    except TelegramBadRequest as exc:
+        logger.warning("Digest HTML rejected by Telegram (%s); retrying plain text.", exc)
+
+    # Strip tags for a safe plain-text fallback (keep readable content).
+    plain = re.sub(r"<[^>]+>", "", text)
+    plain = html.unescape(plain)
+    plain_kwargs = {
+        "reply_markup": markup,
+        "disable_web_page_preview": True,
+    }
+    if edit_message is not None:
+        try:
+            await edit_message.edit_text(plain, **plain_kwargs)
+            return
+        except Exception:
+            pass
+    await bot.send_message(chat_id, plain, **plain_kwargs)
 
 
 async def _render_digest_page(
@@ -94,24 +136,12 @@ async def _render_digest_page(
         page_size=DIGEST_PAGE_SIZE,
     )
 
-    if edit_message is not None:
-        try:
-            await edit_message.edit_text(
-                text,
-                parse_mode="HTML",
-                reply_markup=markup,
-                disable_web_page_preview=True,
-            )
-            return
-        except Exception as exc:
-            logger.info("Digest edit failed, sending new message: %r", exc)
-
-    await bot.send_message(
-        chat_id,
-        text,
-        parse_mode="HTML",
-        reply_markup=markup,
-        disable_web_page_preview=True,
+    await _send_or_edit_digest(
+        bot=bot,
+        chat_id=chat_id,
+        text=text,
+        markup=markup,
+        edit_message=edit_message,
     )
 
 

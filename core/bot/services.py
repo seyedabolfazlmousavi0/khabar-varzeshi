@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 PENDING_BATCH_SIZE = 20
 DIGEST_PAGE_SIZE = 10
 DIGEST_LOOKBACK_HOURS = 24
-DIGEST_LEAD_MAX_CHARS = 220
+DIGEST_LEAD_MAX_CHARS = 160
 DIGEST_HEADER = "۱۰ خبر برگزیده ۲۴ ساعت اخیر از منابع منتخب"
 NEWS_DEEP_LINK_PREFIX = "news_"
 _PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
@@ -117,9 +117,22 @@ def load_pending_digest_page(
 
 def _truncate_plain(text: str, max_chars: int) -> str:
     cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if max_chars <= 0 or not cleaned:
+        return ""
     if len(cleaned) <= max_chars:
         return cleaned
     return cleaned[: max_chars - 1].rstrip() + "…"
+
+
+def _telegram_href(url: str) -> str | None:
+    """Return an HTML-escaped href safe for Telegram parse_mode=HTML, or None."""
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return html.escape(raw, quote=True)
 
 
 def format_digest_message(
@@ -129,46 +142,99 @@ def format_digest_message(
     bot_username: str | None = None,
     page_size: int = DIGEST_PAGE_SIZE,
 ) -> str:
-    """Build the numbered digest list shown to admins."""
-    lines: list[str] = [DIGEST_HEADER, ""]
+    """Build the numbered digest list shown to admins.
+
+    Never hard-truncates the final HTML string (that breaks Telegram ``<a>`` tags).
+    Fits under the message limit by shortening leads instead.
+    """
     start_index = page * page_size
 
+    def _build(lead_max: int) -> str:
+        lines: list[str] = [DIGEST_HEADER, ""]
+        for offset, article in enumerate(articles):
+            number = to_persian_digits(start_index + offset + 1)
+            title = (article.site_title or article.original_title or "بدون تیتر").strip()
+            # Strip characters that can confuse Telegram HTML even after escape.
+            title = title.replace("\n", " ").replace("\r", " ")
+            safe_title = html.escape(title, quote=False)
+
+            try:
+                source_name = html.escape(
+                    (article.source.name or "").strip() or "منبع",
+                    quote=False,
+                )
+            except Exception:
+                source_name = "منبع"
+
+            if bot_username:
+                deep_link = (
+                    f"https://t.me/{bot_username}"
+                    f"?start={NEWS_DEEP_LINK_PREFIX}{article.id}"
+                )
+                title_html = (
+                    f'<a href="{html.escape(deep_link, quote=True)}">{safe_title}</a>'
+                )
+            else:
+                title_html = f"<b>{safe_title}</b>"
+
+            original_url = (article.original_url or "").strip()
+            href = _telegram_href(original_url)
+            if href:
+                # Keep URL visible, but escape entity-sensitive chars (&, <, >).
+                url_label = html.escape(original_url, quote=False)
+                url_html = f'(<a href="{href}">{url_label}</a>)'
+            elif original_url:
+                url_html = f"({html.escape(original_url, quote=False)})"
+            else:
+                url_html = "(—)"
+
+            lead = _truncate_plain(article.site_lead or "", lead_max)
+            lead_html = html.escape(lead, quote=False) if lead else "—"
+
+            lines.append(f"{number}- {title_html} {url_html} / {source_name}")
+            lines.append(lead_html)
+            lines.append("")
+
+        return "\n".join(lines).rstrip()
+
+    for lead_max in (
+        DIGEST_LEAD_MAX_CHARS,
+        120,
+        80,
+        40,
+        0,
+    ):
+        text = _build(lead_max)
+        if len(text) <= TELEGRAM_MESSAGE_LIMIT:
+            return text
+
+    # Absolute fallback: titles only, no original-url anchors (plain escaped URL).
+    lines = [DIGEST_HEADER, ""]
     for offset, article in enumerate(articles):
         number = to_persian_digits(start_index + offset + 1)
-        title = (article.site_title or article.original_title or "بدون تیتر").strip()
-        safe_title = html.escape(title)
-        original_url = (article.original_url or "").strip()
-        safe_url = html.escape(original_url, quote=True) if original_url else ""
-
+        title = html.escape(
+            (article.site_title or article.original_title or "بدون تیتر").strip(),
+            quote=False,
+        )
         try:
-            source_name = html.escape((article.source.name or "").strip() or "منبع")
+            source_name = html.escape(
+                (article.source.name or "").strip() or "منبع",
+                quote=False,
+            )
         except Exception:
             source_name = "منبع"
-
+        original_url = html.escape((article.original_url or "").strip() or "—", quote=False)
         if bot_username:
             deep_link = (
-                f"https://t.me/{bot_username}?start={NEWS_DEEP_LINK_PREFIX}{article.id}"
+                f"https://t.me/{bot_username}"
+                f"?start={NEWS_DEEP_LINK_PREFIX}{article.id}"
             )
-            title_html = f'<a href="{html.escape(deep_link, quote=True)}">{safe_title}</a>'
+            title_html = f'<a href="{html.escape(deep_link, quote=True)}">{title}</a>'
         else:
-            title_html = f"<b>{safe_title}</b>"
-
-        if original_url:
-            url_html = f'(<a href="{safe_url}">{html.escape(original_url)}</a>)'
-        else:
-            url_html = "(—)"
-
-        lead = _truncate_plain(article.site_lead or "", DIGEST_LEAD_MAX_CHARS)
-        lead_html = html.escape(lead) if lead else "—"
-
-        lines.append(f"{number}- {title_html} {url_html} / {source_name}")
-        lines.append(lead_html)
+            title_html = f"<b>{title}</b>"
+        lines.append(f"{number}- {title_html} ({original_url}) / {source_name}")
         lines.append("")
-
-    text = "\n".join(lines).rstrip()
-    if len(text) <= TELEGRAM_MESSAGE_LIMIT:
-        return text
-    return text[: TELEGRAM_MESSAGE_LIMIT - 1].rstrip() + "…"
+    return "\n".join(lines).rstrip()
 
 
 async def send_article_review_card(
